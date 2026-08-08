@@ -20,17 +20,17 @@ Run: `cargo mutants` in a fresh clone of uuid (v1.24.0). **Invocation pitfall: c
 | Metric | Value |
 |---|---|
 | Mutants generated | 974 |
-| Mutants tested (run interrupted at batch end) | 291 |
-| Caught (killed) | 158 |
-| Missed (survived) | 50 |
-| Unviable (compile error) | 83 |
-| Timeout | 0 |
-| Wall clock for 291 mutants | ~23 min (~4.7s/mutant wall, 2 jobs) |
-| Per-mutant build phase | 1–3s (incremental, from debug.log) |
-| Per-mutant test phase | 0.15–0.5s (whole suite, from debug.log) |
+| Mutants tested | 974 (complete run) |
+| Caught (killed) | 291 |
+| Missed (survived) | 471 |
+| Unviable (compile error) | 198 |
+| Timeout | 14 |
+| Wall clock for full run | **4:02:44** (2 jobs; `/usr/bin/time`) |
+| Process CPU | 2,821.84s user + 3,617.94s system; 44% CPU |
+| Maximum RSS | 342,844 kB |
 | Baseline `--no-run` | 1:58 cold |
 
-**The headline number**: ~4.7s wall per mutant on a 2.3k-LOC crate with 2 parallel jobs — the full 974-mutant run would take ~75 min on this box. cargo-mutants' whole-suite-per-mutant approach is the incumbent's cost; per-test routing (see `coverage-routing.md`) is the gap rust_mutant sells against.
+**The headline number**: the complete run took **4:02:44 wall** for 974 mutants, or **14.95s per generated mutant** with 2 parallel jobs. The earlier ~23-minute / 291-mutant snapshot was partial and is superseded by this full result. cargo-mutants' whole-suite-per-mutant approach is the incumbent's cost; per-test routing (see `coverage-routing.md`) is the gap rust_mutant sells against.
 
 ## The sambungapi dogfood corpus (primary benchmark target)
 
@@ -48,6 +48,6 @@ MetatechID/sambungapi (private) — Rust axum + rusqlite wire-compatible Composi
 ## Recommended benchmark target set (README claims)
 
 1. **sambungapi** — the dogfood corpus, primary claim ("runs on a real 10k-LOC service").
-2. **uuid** — the small-crate claim, with cargo-mutants comparison (291+ mutants, ~4.7s/mutant vs rust_mutant's routed cost).
+2. **uuid** — the small-crate claim, with the complete cargo-mutants comparison (974 generated: 291 caught / 471 missed / 198 unviable / 14 timeouts; 4:02:44 wall on 2 cores).
 3. **anyhow or thiserror** — second small-crate data point.
 4. Defer serde/clap/axum to the large-fixture gate (M2/M3 demo on a beefier box).
