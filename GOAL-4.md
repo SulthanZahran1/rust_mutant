@@ -1,7 +1,7 @@
 # GOAL 1.0.0: TCE, reports, contract, and distribution
 
 > **Status:** draft (proposed 2026-08-08). Locking is a human act. See Human check.
-> **Prerequisite:** [GOAL-3.md](GOAL-3.md) signed-off, plus the CLI decision ticket resolved before contract freeze.
+> **Prerequisite:** [GOAL-3.md](GOAL-3.md) signed-off, plus [the CLI surface contract](https://github.com/SulthanZahran1/rust_mutant/issues/9) resolved before contract freeze.
 > **Scope decided in [GOAL milestone boundaries + fixture sizing contract](https://github.com/SulthanZahran1/rust_mutant/issues/8):** LLVM-IR TCE, Stryker JSON/JUnit/HTML reports, threshold gate, agent-friendly JSON, Windows, crates.io, Homebrew, installer, release artifacts, and Linux/Windows CI.
 
 ## Mission
@@ -28,9 +28,9 @@ The same in-memory result model produces console, Stryker mutation-testing-eleme
 
 ### 3. Frozen CLI and JSON contract
 
-The CLI decision ticket defines final flags, exit codes, configuration precedence, error behavior, report formats, and JSON schema. `schemaVersion` is present and breaking changes require a major version bump.
+The resolved CLI contract in [`docs/cli-contract.md`](docs/cli-contract.md) defines the `rust-mutant --path .` invocation, final flags, configuration precedence, error behavior, report formats, resource governor, exit codes, and JSON schema. `schemaVersion` is present and breaking changes require a major version bump.
 
-**Test:** commit `docs/cli-contract.md`; run the contract integration suite against help, valid runs, invalid paths, empty projects, threshold pass/fail, invalid operator selections, and each report format.
+**Test:** run the contract integration suite against help, valid runs, invalid paths, empty projects, threshold pass/fail, invalid operator selections, concurrent-session resource limits, and each report format.
 
 **Pass:** the implementation, contract document, and integration assertions agree; two identical runs diff cleanly after stripping explicitly variable timing and generated-at fields; the schema version is present and correct.
 
@@ -61,7 +61,7 @@ The release process publishes:
 - An installer that downloads the platform artifact, verifies its checksum, and falls back to a user-local bin directory when needed.
 - GitHub release notes with version and supported platforms.
 
-**Test:** run the release workflow on a draft tag; install from the release path in a clean environment; run `rust_mutant --version` and a small fixture.
+**Test:** run the release workflow on a draft tag; install from the release path in a clean environment; run `rust-mutant --version` and a small fixture.
 
 **Pass:** artifacts, checksums, crates.io, Homebrew, and installer paths all resolve to the tagged version; the clean-environment binary runs the small fixture; Linux and Windows release jobs are green.
 

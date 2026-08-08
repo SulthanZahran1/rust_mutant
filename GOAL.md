@@ -16,6 +16,7 @@
 
 - [Decide: Rust-idiomatic operator set](https://github.com/SulthanZahran1/rust_mutant/issues/7) — 18 public families: 10 generic table-stakes plus 8 Rust-idiomatic families; syntax-first generation; compiler-classified `compile_error`; Arc/Rc only for smart pointers; map/filter/collect for iterator chains.
 - [Decide: GOAL milestone boundaries + fixture sizing contract](https://github.com/SulthanZahran1/rust_mutant/issues/8) — four milestones; Rust-calibrated 12–15 / 60–80 / 300+ fixture gates; M2 unlocks the sambungapi gate; Windows, crates.io, Homebrew, installer, releases, and `schemaVersion` are hard 1.0.0 gates.
+- [Decide: rust_mutant CLI surface (agent-friendly contract)](https://github.com/SulthanZahran1/rust_mutant/issues/9) — `rust-mutant --path .`, TOML configuration, pure agent JSON with `schemaVersion: 1`, explicit report formats, exit codes 0–3, and a host-wide CPU/RAM resource governor.
 
 ## Research basis
 
@@ -44,7 +45,7 @@ Locking is a human act. A draft becomes locked only when the human confirms that
 5. Run the signed-off live demo in front of the human.
 6. Record the sign-off and update this index only after the human confirms it.
 
-The CLI and JSON surface remains provisional through M3. M4 freezes the contract after the CLI decision ticket is resolved.
+The CLI and JSON surface is decided by the CLI contract ticket and remains implementation-provisional through M3. M4 freezes the contract after the implementation, documentation, and integration tests agree.
 
 ## Non-negotiables
 

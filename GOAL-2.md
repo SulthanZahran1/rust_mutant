@@ -12,7 +12,7 @@ Complete the 1.0.0 operator inventory and prove it against real fixture projects
 
 ### 1. Complete public operator inventory
 
-`rust_mutant --list-operators` reports exactly 18 public families:
+`rust-mutant --list-operators` reports exactly 18 public families:
 
 - Generic: AOR, AOD, AOI, ROR, LOR, LCR, COR, SDL, RVR, loop increment/decrement.
 - Rust-idiomatic: `?` removal, `unwrap()`/`expect()` removal, `.await` removal, `move`-closure removal, `&mut` to `&`, `.clone()` removal, Arc/Rc swap, and iterator-chain mutation.
@@ -35,7 +35,7 @@ The eight idiomatic families operate on the verified tree-sitter node shapes fro
 
 Users can select a subset of families and subtypes without changing discovery order or ids outside the selection.
 
-**Test:** `rust_mutant --path tests/fixtures/medium --operators ROR,await-removal --json`; run an invalid operator name and an empty selection.
+**Test:** `rust-mutant --path tests/fixtures/medium --operators ROR,await-removal --json`; run an invalid operator name and an empty selection.
 
 **Pass:** output contains only the requested families/subtypes; invalid names fail clearly; an empty selection does not silently run all operators.
 
@@ -51,7 +51,7 @@ The small fixture is deliberately safe and does not need to exercise all 18 fami
 
 The medium fixture contains 60–80 mutants, all 18 families, and deliberate examples of `killed`, `survived`, `timeout`, `not_covered`, and `compile_error`.
 
-**Test:** `rust_mutant --path tests/fixtures/medium --json`; parse the per-family and per-status distributions; verify the baseline before the run.
+**Test:** `rust-mutant --path tests/fixtures/medium --json`; parse the per-family and per-status distributions; verify the baseline before the run.
 
 **Pass:** 60–80 mutants; every family produces at least one mutant; every five-bucket status is present; counts sum to total; cold wall time is no greater than 90 seconds.
 
@@ -95,7 +95,7 @@ Fixtures have green baselines, assert original behavior rather than mutant behav
 
 The agent runs live in front of the human:
 
-1. `rust_mutant --list-operators` and the family/subtype JSON listing.
+1. `rust-mutant --list-operators` and the family/subtype JSON listing.
 2. A before/after demonstration for each of the eight idiomatic families, including the Arc/Rc and iterator-chain scope limits.
 3. Small, medium, and large fixture runs with real counts, status distributions, MSI, compile-error calculation, and timings.
 4. The operator-filtering and invalid-name behavior.

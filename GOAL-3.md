@@ -2,7 +2,7 @@
 
 > **Status:** draft (proposed 2026-08-08). Locking is a human act. See Human check.
 > **Prerequisite:** [GOAL-2.md](GOAL-2.md) signed-off.
-> **Scope decided in [GOAL milestone boundaries + fixture sizing contract](https://github.com/SulthanZahran1/rust_mutant/issues/8):** per-test coverage routing, adaptive timeouts, bounded parallel scheduling, content-addressed cache, incremental mode, and single-mutant debugging. TCE and distribution remain M4.
+> **Scope decided in [GOAL milestone boundaries + fixture sizing contract](https://github.com/SulthanZahran1/rust_mutant/issues/8) and [CLI surface contract](https://github.com/SulthanZahran1/rust_mutant/issues/9):** per-test coverage routing, adaptive timeouts, bounded parallel scheduling, host-wide CPU/RAM resource coordination, content-addressed cache, incremental mode, and single-mutant debugging. TCE and distribution remain M4.
 
 ## Mission
 
@@ -30,11 +30,13 @@ Derive each mutant's timeout from the baseline duration of its covering tests wi
 
 ### 3. Bounded parallel scheduler
 
-Run independent scratch copies through a bounded Rayon scheduler controlled by `--parallel N`. Report rows and aggregate counts are deterministic regardless of scheduling.
+Run independent scratch copies through a bounded Rayon scheduler controlled by `--parallel N` and the host-wide resource governor. `--parallel N` is only a per-session upper bound. Report rows and aggregate counts are deterministic regardless of scheduling.
 
-**Test:** run the large fixture with `--parallel 1` and `--parallel 2` on the reference two-core box, excluding timing fields from the JSON comparison.
+**Test:** run the large fixture with `--parallel 1` and `--parallel 8` on the reference two-core box, launch two mutation sessions concurrently, and inspect resource receipts while excluding timing fields from the JSON comparison.
 
-**Pass:** JSON mutant records and aggregate counts are byte-identical after timing fields are removed; `--parallel 2` is at least 25% faster than serial on the reference two-core box.
+**Pass:** JSON mutant records and aggregate counts are byte-identical after timing fields are removed; on a two-effective-CPU host the default and `--parallel 8` both select one global mutant worker; a second session waits rather than increasing aggregate workers; nested Cargo jobs do not multiply outer parallelism.
+
+The global CPU budget is `max(1, floor(0.75 * effective_cpu_budget))`, where effective capacity comes from process affinity or cgroup quota. All sessions claim slots from one crash-released semaphore. A global memory guard reserves at least 25% for the rest of the system, tracks registered session/child RSS, pauses new workers under pressure, and reports throttling without changing mutant classification. `--max-memory <MiB>` can lower the budget but cannot raise the safety ceiling.
 
 ### 4. Content-addressed cache
 
@@ -62,7 +64,7 @@ A user can select one mutant by stable id or discovery index and see its source 
 
 ### 7. Performance receipt and scope discipline
 
-The tool records routing setup time, per-mutant execution time, cache hits, parallelism, and total wall time. External benchmark targets remain provisional until the map specifies them.
+The tool records routing setup time, per-mutant execution time, cache hits, requested and effective parallelism, global CPU budget, active sessions, memory budget, peak RSS, resource throttling, and total wall time. External benchmark targets remain provisional until the map specifies them.
 
 **Test:** parse the JSON receipt from small, medium, and large runs and compare it with the measured cost model in `docs/research/coverage-routing.md`.
 
@@ -75,6 +77,8 @@ The tool records routing setup time, per-mutant execution time, cache hits, para
 - `cargo test` remains the baseline gate; cargo-nextest is required for routing and timeout execution.
 - Cache keys and coverage-map formats are internal in M3 but carry a version field from day one. M4 freezes externally visible schema fields.
 - Sort all output independent of scheduling.
+- `--parallel` never bypasses the host-wide CPU/RAM governor. Nested Cargo execution consumes the same budget through one build job per outer worker or a shared jobserver.
+- Resource receipts identify requested workers, effective workers, global budget, active sessions, memory ceiling, peak RSS, and any wait/throttle interval.
 - Fixture-mutating integration tests acquire a shared serial lock and run with one test thread.
 - Commit each speed feature atomically with fixture-level regression tests and measured receipts.
 
@@ -87,8 +91,9 @@ The agent runs live in front of the human:
 1. Routing on versus full-suite comparison on the medium fixture, including a hand-checked line and the routing-never-kills result.
 2. Adaptive timeout cases and a deliberately low timeout override that terminates safely.
 3. Serial versus parallel large-fixture output and timings.
-4. Cold run, warm cache run, changed-file incremental run, and one `--mutant` debug run.
-5. A real Rust project chosen by the human, while treating the external benchmark set as pending map scope.
+4. Two concurrent sessions on the two-effective-CPU reference host, demonstrating one aggregate worker and memory-safe waiting.
+5. Cold run, warm cache run, changed-file incremental run, and one `--mutant` debug run.
+6. A real Rust project chosen by the human, while treating the external benchmark set as pending map scope.
 
 **Sign-off:** the human confirms the M3 criteria in-session; the document can then be marked signed-off.
 

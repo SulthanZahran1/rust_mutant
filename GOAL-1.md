@@ -6,13 +6,13 @@
 
 ## Mission
 
-Build a working Rust mutation pipeline. `rust_mutant --path <crate>` parses Rust with tree-sitter-rust, discovers generic mutation points, applies each mutant to a source-only scratch copy, runs the crate tests, and classifies every result as `killed`, `survived`, `not_covered`, `compile_error`, or `timeout`. The source project remains byte-identical before and after the run.
+Build a working Rust mutation pipeline. `rust-mutant --path <crate>` parses Rust with tree-sitter-rust, discovers generic mutation points, applies each mutant to a source-only scratch copy, runs the crate tests, and classifies every result as `killed`, `survived`, `not_covered`, `compile_error`, or `timeout`. The source project remains byte-identical before and after the run.
 
 ## Verifiable Acceptance Criteria
 
 ### 1. Workspace and provisional CLI
 
-A Cargo workspace contains a core library and a `rust_mutant` binary. The binary accepts a project path and exposes provisional dry-run, JSON, and timeout controls. The final flag and exit-code contract is deferred to M4 after the CLI decision ticket.
+A Cargo workspace contains a core library and a `rust-mutant` binary. The binary accepts a project path and exposes the provisional M1 subset of the CLI contract. The full contract is documented by the CLI decision and freezes in M4.
 
 **Test:** `cargo build --workspace`; `cargo run --release -- --help`; `cargo run --release -- --path /does/not/exist`.
 
@@ -22,7 +22,7 @@ A Cargo workspace contains a core library and a `rust_mutant` binary. The binary
 
 Discovery covers the locked 10 generic table-stakes families: AOR, AOD, AOI, ROR, LOR, LCR, COR, SDL, RVR, and loop increment/decrement. Each discovered point carries a stable mutant id, file identity, line, column, family, subtype, original text, and replacement text.
 
-**Test:** `rust_mutant --path tests/fixtures/small --dry-run --json` and a parser/operator unit-test suite.
+**Test:** `rust-mutant --path tests/fixtures/small --dry-run --json` and a parser/operator unit-test suite.
 
 **Pass:** every generic family exercised by the fixture produces at least one point; JSON fields are present; source spans are valid UTF-8 boundaries and point at the expected original text.
 
@@ -75,7 +75,7 @@ The M1 fixture uses safe generic constructs and contains 12–15 mutants. It is 
 
 The agent runs live in front of the human:
 
-1. `cargo build --release` and `rust_mutant --help`, showing real exit codes.
+1. `cargo build --release` and `rust-mutant --help`, showing real exit codes.
 2. The small fixture baseline, dry-run JSON, and full JSON run, including counts and the <=20s timing gate.
 3. A hand-applied mutant in a scratch copy, demonstrating that the observed test result maps to the reported classification.
 4. A real small Rust crate chosen by the human, with the original tree hash verified before and after.
