@@ -61,7 +61,7 @@ The large fixture is a multi-file Rust project with 300 or more mutants and real
 
 **Test:** run the real binary twice against `tests/fixtures/large`, first cold and then warm after M3 cache support is available.
 
-**Pass:** 300+ mutants, all five pre-TCE buckets present, MSI between 55% and 75%, cold wall time under 10 minutes, and the warm cached run under 30 seconds once M3 is implemented.
+**Pass:** 300+ mutants, all five pre-TCE buckets present, MSI between 55% and 75%, and cold wall time under 10 minutes. The fixture is retained for M3's warm-cache gate, which must be under 30 seconds.
 
 ### 7. Compile-error budget
 

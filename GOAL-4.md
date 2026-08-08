@@ -16,7 +16,7 @@ For surviving mutants, compile original and scratch-tree mutant through Cargo in
 
 **Test:** run a 12-case soundness fixture containing six deliberately equivalent and six must-differ mutants, including a commutativity case and a multi-file case.
 
-**Pass:** all six equivalent cases are detected or explicitly documented as safe under-detection; zero must-differ cases classify as `equivalent`; a killable mutant is never marked equivalent; the result records TCE cost and excludes `equivalent` from MSI. TCE runs through Cargo debug mode, never direct release rustc.
+**Pass:** all six equivalent cases are detected; zero must-differ cases classify as `equivalent`; a killable mutant is never marked equivalent; the result records TCE cost and excludes `equivalent` from MSI. TCE runs through Cargo debug mode, never direct release rustc.
 
 ### 2. Reports from one result model
 

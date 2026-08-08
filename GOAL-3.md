@@ -34,7 +34,7 @@ Run independent scratch copies through a bounded Rayon scheduler controlled by `
 
 **Test:** run the large fixture with `--parallel 1` and `--parallel 2` on the reference two-core box, excluding timing fields from the JSON comparison.
 
-**Pass:** JSON mutant records and aggregate counts are byte-identical after timing fields are removed; `--parallel 2` is at least 25% faster than serial on the reference box or the measured contention is captured as an explicit receipt and regression guard.
+**Pass:** JSON mutant records and aggregate counts are byte-identical after timing fields are removed; `--parallel 2` is at least 25% faster than serial on the reference two-core box.
 
 ### 4. Content-addressed cache
 
