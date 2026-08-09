@@ -1,6 +1,6 @@
 //! Self-contained HTML mutation report.
 
-use crate::{Report, escape_html, status_css_class, status_display, status_reason};
+use crate::{Report, escape_html, family_summary, status_css_class, status_display, status_reason};
 
 pub fn generate(report: &Report) -> String {
     let mut html = String::from(
@@ -44,6 +44,21 @@ pub fn generate(report: &Report) -> String {
         report.timing.tce_ms,
         report.timing.total_ms
     ));
+    html.push_str("<h2>Families</h2><table><thead><tr><th>Family</th><th>Total</th><th>Killed</th><th>Survived</th><th>Equivalent</th><th>Not covered</th><th>Compile error</th><th>Timeout</th></tr></thead><tbody>");
+    for (family, counts) in family_summary(report) {
+        html.push_str(&format!(
+            "<tr><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td></tr>",
+            escape_html(&family),
+            counts.total,
+            counts.killed,
+            counts.survived,
+            counts.equivalent,
+            counts.not_covered,
+            counts.compile_error,
+            counts.timeout
+        ));
+    }
+    html.push_str("</tbody></table>");
     html.push_str("<h2>Mutants</h2><table><thead><tr><th>ID</th><th>Location</th><th>Family</th><th>Mutation</th><th>Status</th><th>Tests</th><th>Duration</th><th>Details</th></tr></thead><tbody>");
     for result in &report.mutants {
         let class = status_css_class(&result.status);

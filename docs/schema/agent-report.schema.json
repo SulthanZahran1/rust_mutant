@@ -1,0 +1,33 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/SulthanZahran1/rust_mutant/blob/main/docs/schema/agent-report.schema.json",
+  "title": "rust-mutant agent report",
+  "type": "object",
+  "required": ["schemaVersion", "tool", "project", "summary", "mutants", "timing", "resources"],
+  "properties": {
+    "schemaVersion": { "const": 1 },
+    "tool": { "type": "object" },
+    "project": { "type": "object" },
+    "summary": {
+      "type": "object",
+      "required": ["total", "killed", "survived", "notCovered", "compileError", "timeout", "equivalent", "msi", "excludedBuckets"],
+      "properties": {
+        "total": { "type": "integer", "minimum": 0 },
+        "killed": { "type": "integer", "minimum": 0 },
+        "survived": { "type": "integer", "minimum": 0 },
+        "notCovered": { "type": "integer", "minimum": 0 },
+        "compileError": { "type": "integer", "minimum": 0 },
+        "timeout": { "type": "integer", "minimum": 0 },
+        "equivalent": { "type": "integer", "minimum": 0 },
+        "msi": { "type": "number", "minimum": 0, "maximum": 100 },
+        "threshold": { "type": ["number", "null"], "minimum": 0, "maximum": 100 },
+        "thresholdPassed": { "type": "boolean" },
+        "excludedBuckets": { "type": "array", "items": { "type": "string" } }
+      }
+    },
+    "mutants": { "type": "array", "items": { "type": "object" } },
+    "timing": { "type": "object" },
+    "resources": { "type": "object" }
+  },
+  "additionalProperties": true
+}

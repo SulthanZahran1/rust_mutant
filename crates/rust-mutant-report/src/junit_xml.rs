@@ -1,6 +1,6 @@
 //! JUnit XML mutation-result adapter.
 
-use crate::{Report, escape_xml, status_display, status_reason};
+use crate::{Report, escape_xml, family_summary, status_display, status_reason};
 
 pub fn generate(report: &Report) -> String {
     let total = report.mutants.len();
@@ -23,6 +23,40 @@ pub fn generate(report: &Report) -> String {
         "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<testsuite name=\"rust-mutant\" tests=\"{total}\" failures=\"{failures}\" errors=\"{errors}\" skipped=\"{skipped}\" time=\"{:.3}\">\n",
         report.timing.total_ms as f64 / 1000.0
     );
+    output.push_str("  <properties>\n");
+    output.push_str(&format!(
+        "    <property name=\"rust-mutant.msi\" value=\"{:.6}\"/>\n",
+        report.summary.msi
+    ));
+    output.push_str(&format!(
+        "    <property name=\"rust-mutant.threshold\" value=\"{}\"/>\n",
+        report
+            .summary
+            .threshold
+            .map(|value| format!("{value:.6}"))
+            .unwrap_or_else(|| "disabled".into())
+    ));
+    output.push_str(&format!(
+        "    <property name=\"rust-mutant.threshold-passed\" value=\"{}\"/>\n",
+        report.summary.threshold_passed
+    ));
+    for (family, counts) in family_summary(report) {
+        let family = escape_xml(&family);
+        for (bucket, value) in [
+            ("total", counts.total),
+            ("killed", counts.killed),
+            ("survived", counts.survived),
+            ("equivalent", counts.equivalent),
+            ("not-covered", counts.not_covered),
+            ("compile-error", counts.compile_error),
+            ("timeout", counts.timeout),
+        ] {
+            output.push_str(&format!(
+                "    <property name=\"rust-mutant.family.{family}.{bucket}\" value=\"{value}\"/>\n"
+            ));
+        }
+    }
+    output.push_str("  </properties>\n");
     for result in &report.mutants {
         let name = escape_xml(&format!("{}:{}", result.mutant.file, result.mutant.id));
         let classname = escape_xml(&result.mutant.family);

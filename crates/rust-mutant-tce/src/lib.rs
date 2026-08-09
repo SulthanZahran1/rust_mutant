@@ -60,6 +60,7 @@ pub fn compare(
     mutant_project: &Path,
     mutant_manifest: &Path,
     target_root: &Path,
+    expected_function: Option<&str>,
 ) -> Result<TceResult> {
     let started = Instant::now();
     let original_target = target_root.join("original");
@@ -70,8 +71,18 @@ pub fn compare(
     }
     fs::create_dir_all(target_root)?;
 
-    let original_ir = compile_and_collect(original_project, original_manifest, &original_target)?;
-    let mutant_ir = compile_and_collect(mutant_project, mutant_manifest, &mutant_target)?;
+    let original_ir = compile_and_collect(
+        original_project,
+        original_manifest,
+        &original_target,
+        expected_function,
+    )?;
+    let mutant_ir = compile_and_collect(
+        mutant_project,
+        mutant_manifest,
+        &mutant_target,
+        expected_function,
+    )?;
     let original_hash = stable_hash(&original_ir);
     let mutant_hash = stable_hash(&mutant_ir);
     let equivalent = original_ir == mutant_ir;
@@ -92,12 +103,23 @@ pub fn compare(
     })
 }
 
-fn compile_and_collect(project: &Path, manifest: &Path, target: &Path) -> Result<String> {
+fn compile_and_collect(
+    project: &Path,
+    manifest: &Path,
+    target: &Path,
+    expected_function: Option<&str>,
+) -> Result<String> {
     let package = package_name(manifest)?;
-    let remap = format!(
-        "-C opt-level=2 -C debuginfo=0 --emit=llvm-ir --remap-path-prefix={}=/SRC",
-        project.display()
-    );
+    let remap = format!("--remap-path-prefix={}=/SRC", project.display());
+    let encoded_flags = [
+        "-C",
+        "opt-level=2",
+        "-C",
+        "debuginfo=0",
+        "--emit=llvm-ir",
+        &remap,
+    ]
+    .join("\u{1f}");
     let output = Command::new("cargo")
         .current_dir(project)
         .arg("build")
@@ -106,7 +128,8 @@ fn compile_and_collect(project: &Path, manifest: &Path, target: &Path) -> Result
         .arg("--target-dir")
         .arg(target)
         .arg("--quiet")
-        .env("RUSTFLAGS", remap)
+        .env_remove("RUSTFLAGS")
+        .env("CARGO_ENCODED_RUSTFLAGS", encoded_flags)
         .output()
         .with_context(|| format!("spawn cargo TCE build in {}", project.display()))?;
     if !output.status.success() {
@@ -154,6 +177,13 @@ fn compile_and_collect(project: &Path, manifest: &Path, target: &Path) -> Result
     if definitions == 0 {
         bail!("TCE produced empty LLVM IR for package `{package}`; refusing equivalence");
     }
+    if let Some(expected_function) = expected_function
+        && !has_expected_definition(&normalized, expected_function)
+    {
+        bail!(
+            "TCE expected function `{expected_function}` is absent from LLVM IR for package `{package}`; refusing equivalence"
+        );
+    }
     Ok(normalized)
 }
 
@@ -198,6 +228,7 @@ fn normalize_ir(ir: &str) -> String {
         }
         line = normalize_alloc_names(&line);
         line = normalize_panic_location(&line);
+        line = normalize_commutative_add(&line);
         lines.push(line);
     }
     lines.join("\n")
@@ -248,6 +279,64 @@ fn normalize_panic_location(line: &str) -> String {
     result
 }
 
+fn normalize_commutative_add(line: &str) -> String {
+    let Some(op) = line.find(" = add ") else {
+        return line.to_string();
+    };
+    let operands_start = op + " = add ".len();
+    let rest = &line[operands_start..];
+    let Some(comma) = top_level_comma(rest) else {
+        return line.to_string();
+    };
+    let left = &rest[..comma];
+    let Some(separator) = left.rfind(char::is_whitespace) else {
+        return line.to_string();
+    };
+    let prefix = &rest[..=separator];
+    let first = left[separator + 1..].trim();
+    let right_with_suffix = rest[comma + 1..].trim_start();
+    let (second, suffix) = right_with_suffix
+        .find(", !")
+        .map_or((right_with_suffix, ""), |index| {
+            (&right_with_suffix[..index], &right_with_suffix[index..])
+        });
+    let second = second.trim();
+    if first <= second {
+        return line.to_string();
+    }
+    format!(
+        "{}{}{}, {}{}",
+        &line[..operands_start],
+        prefix,
+        second,
+        first,
+        suffix
+    )
+}
+
+fn top_level_comma(value: &str) -> Option<usize> {
+    let mut angle = 0usize;
+    let mut paren = 0usize;
+    for (index, character) in value.char_indices() {
+        match character {
+            '<' => angle += 1,
+            '>' => angle = angle.saturating_sub(1),
+            '(' => paren += 1,
+            ')' => paren = paren.saturating_sub(1),
+            ',' if angle == 0 && paren == 0 => return Some(index),
+            _ => {}
+        }
+    }
+    None
+}
+
+fn has_expected_definition(ir: &str, expected_function: &str) -> bool {
+    ir.lines().any(|line| {
+        line.contains(expected_function)
+            && (line.trim_start().starts_with("define ") || line.contains(" = unnamed_addr alias "))
+    })
+}
+
 fn stable_hash(value: &str) -> String {
     let mut hash = 0xcbf29ce484222325u64;
     for byte in value.bytes() {
@@ -282,5 +371,21 @@ mod tests {
                 .count(),
             0
         );
+    }
+
+    #[test]
+    fn integer_add_commutativity_is_canonicalized() {
+        let left = normalize_ir("define i32 @f(i32 %a, i32 %b) {\n%1 = add i32 %a, %b\n}");
+        let right = normalize_ir("define i32 @f(i32 %a, i32 %b) {\n%1 = add i32 %b, %a\n}");
+        assert_eq!(left, right);
+    }
+
+    #[test]
+    fn absent_expected_definition_is_rejected() {
+        assert!(!has_expected_definition("define i32 @other()", "target"));
+        assert!(has_expected_definition(
+            "@target = unnamed_addr alias i32, ptr @other",
+            "target"
+        ));
     }
 }

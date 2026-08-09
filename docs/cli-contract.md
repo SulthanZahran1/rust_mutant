@@ -1,6 +1,6 @@
 # rust-mutant CLI contract
 
-> **Status:** decided by [CLI surface issue](https://github.com/SulthanZahran1/rust_mutant/issues/9); implementation remains provisional until M4 contract tests pass.
+> **Status:** frozen for rust-mutant 1.0.0 by the GOAL-4 lock. Breaking changes require explicit human renegotiation.
 > **Canonical executable:** `rust-mutant`
 
 This document is the agent-facing CLI contract. The published executable uses the hyphenated name even though the repository is named `rust_mutant`.
@@ -49,9 +49,11 @@ TOML is the only canonical configuration format. `.cargo/mutants.toml` is not im
 - `--json` is an alias for `--format json`.
 - `--format json --quiet` emits exactly one agent JSON document on stdout.
 - Progress and diagnostics use stderr, never stdout.
-- Multiple formats require `--output <DIR>`.
+- File formats use `--output <DIR>` when a custom destination is needed; otherwise they use `<project>/mutation-reports`.
 - `--format json` means the rust-mutant agent envelope.
 - Stryker mutation-testing-elements output is explicit with `--format stryker-json`.
+- `--format stryker-json` writes `mutation-report.json`, `--format junit` writes `mutation-results.xml`, and `--format html` writes `mutation-report.html` under `--output` or `<project>/mutation-reports`.
+- Stryker JSON uses mutation-testing-elements schema version `"2"`, with object-valued `files` entries containing `language`, `source`, and `mutants`.
 
 ### Agent JSON envelope
 
@@ -147,4 +149,4 @@ RAM is guarded globally as well:
 killed / (killed + survived)
 ```
 
-A valid JSON run emits its report even when exiting with code `1` or `3`. Resource throttling does not alter MSI or outcome classification.
+A valid JSON run emits its report even when exiting with code `1` or `3`. Resource throttling does not alter MSI or outcome classification. A zero-mutant report is emitted with exit code `3`.

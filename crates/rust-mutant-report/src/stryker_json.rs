@@ -4,7 +4,7 @@ use anyhow::Result;
 use serde::Serialize;
 use std::collections::BTreeMap;
 
-use crate::{Report, source_for, status_reason, stryker_status};
+use crate::{Report, family_summary, source_for, status_reason, stryker_status};
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -12,6 +12,7 @@ struct StrykerReport {
     schema_version: String,
     thresholds: Thresholds,
     project_root: String,
+    config: serde_json::Value,
     files: BTreeMap<String, StrykerFile>,
 }
 
@@ -132,6 +133,16 @@ pub fn generate(report: &Report) -> Result<String> {
             low: threshold.saturating_sub(20),
         },
         project_root: report.project.path.clone(),
+        config: serde_json::json!({
+            "rustMutant": {
+                "schemaVersion": report.schema_version,
+                "msi": report.summary.msi,
+                "threshold": report.summary.threshold,
+                "thresholdPassed": report.summary.threshold_passed,
+                "excludedBuckets": report.summary.excluded_buckets,
+                "familySummary": family_summary(report),
+            }
+        }),
         files,
     };
     Ok(serde_json::to_string_pretty(&output)?)

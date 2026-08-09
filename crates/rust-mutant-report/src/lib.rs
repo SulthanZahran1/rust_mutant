@@ -11,6 +11,41 @@ pub mod stryker_json;
 
 pub use rust_mutant_core::{MutantResult, Report, Status, Summary};
 
+use serde::Serialize;
+use std::collections::BTreeMap;
+
+#[derive(Debug, Clone, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FamilySummary {
+    pub total: usize,
+    pub killed: usize,
+    pub survived: usize,
+    pub equivalent: usize,
+    pub not_covered: usize,
+    pub compile_error: usize,
+    pub timeout: usize,
+}
+
+pub fn family_summary(report: &Report) -> BTreeMap<String, FamilySummary> {
+    let mut summary = BTreeMap::new();
+    for result in &report.mutants {
+        let entry = summary
+            .entry(result.mutant.family.clone())
+            .or_insert_with(FamilySummary::default);
+        entry.total += 1;
+        match result.status.as_str() {
+            "killed" => entry.killed += 1,
+            "survived" => entry.survived += 1,
+            "equivalent" => entry.equivalent += 1,
+            "not_covered" => entry.not_covered += 1,
+            "compile_error" => entry.compile_error += 1,
+            "timeout" => entry.timeout += 1,
+            _ => {}
+        }
+    }
+    summary
+}
+
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct StatusCounts {
     pub killed: usize,
