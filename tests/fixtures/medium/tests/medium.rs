@@ -7,6 +7,8 @@ fn baseline_covers_medium_behaviors() {
     assert_eq!(arithmetic::arithmetic_b(8, 2), 7);
 
     assert_eq!(control::timeout_loop(3), 3);
+    assert_eq!(control::timeout_float_a(3.0), 3.0);
+    assert_eq!(control::timeout_float_b(3.0), 3.0);
     assert_eq!(control::statement_a(4), 5);
     assert_eq!(control::statement_b(4), 3);
     assert!(control::returned_a(42));

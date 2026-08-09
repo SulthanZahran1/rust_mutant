@@ -14,6 +14,22 @@ pub fn timeout_loop(n: i32) -> i32 {
     i
 }
 
+pub fn timeout_float_a(n: f64) -> f64 {
+    let mut i = 0.0;
+    while i < n {
+        i += 1.0;
+    }
+    i
+}
+
+pub fn timeout_float_b(n: f64) -> f64 {
+    let mut i = 0.0;
+    while i < n {
+        i += 1.0;
+    }
+    i
+}
+
 pub fn statement_a(x: i32) -> i32 {
     let y = x + 1;
     println!("{y}");

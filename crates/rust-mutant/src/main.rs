@@ -116,6 +116,10 @@ fn real_main() -> Result<u8> {
         dry_run: cli.dry_run,
         requested_workers: cli.parallel.max(1),
         no_cache: cli.no_cache,
+        routing: !cli.no_routing,
+        incremental: cli.incremental,
+        base_ref: cli.base_ref,
+        max_memory_mib: cli.max_memory,
     };
     let report = run(&options)?;
     let wants_json = cli.json || matches!(cli.format, Format::Json);
