@@ -154,7 +154,7 @@ fn ror_ignores_generic_type_delimiters() {
     assert_eq!(mutants[0]["original"], "<");
     assert_eq!(mutants[0]["replacement"], ">");
     assert_eq!(mutants[0]["file"], "src/lib.rs");
-    assert_eq!(mutants[0]["line"], 9);
+    assert_eq!(mutants[0]["line"], 10);
     assert_eq!(mutants[0]["column"], 10);
 }
 

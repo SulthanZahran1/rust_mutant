@@ -399,7 +399,7 @@ fn discover_file(
                     ">=" => "<",
                     "==" => "!=",
                     "!=" => "==",
-                    _ => "<",
+                    _ => unreachable!("unrecognized relational operator: {op}"),
                 };
                 if relational_operators.contains(&i) {
                     push_if(
@@ -2825,6 +2825,11 @@ mod tests {
         let source = r#"
 struct ProbeEntry;
 
+struct ProbePlan {
+    drift: Vec<ProbeEntry>,
+    optional: Option<ProbeEntry>,
+}
+
 fn probe(left: usize, right: usize) {
     let _vec: Vec<ProbeEntry> = Vec::new();
     let _option: Option<ProbeEntry> = None;
@@ -2852,6 +2857,19 @@ fn probe(left: usize, right: usize) {
                 .map(|mutant| mutant.original.as_str())
                 .collect::<Vec<_>>(),
             vec!["<", ">", "<=", ">=", "==", "!="]
+        );
+        assert_eq!(
+            ror.iter()
+                .map(|mutant| (mutant.original.as_str(), mutant.replacement.as_str()))
+                .collect::<Vec<_>>(),
+            vec![
+                ("<", ">"),
+                (">", "<"),
+                ("<=", ">"),
+                (">=", "<"),
+                ("==", "!="),
+                ("!=", "=="),
+            ]
         );
         assert!(ror.iter().all(|mutant| mutant.source_line.contains("left")));
     }
