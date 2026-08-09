@@ -110,7 +110,8 @@ fn compile_and_collect(
     expected_function: Option<&str>,
 ) -> Result<String> {
     let package = package_name(manifest)?;
-    let remap = format!("--remap-path-prefix={}=/SRC", project.display());
+    let project_prefix = project.to_string_lossy().replace('\\', "/");
+    let remap = format!("--remap-path-prefix={project_prefix}=/SRC");
     let encoded_flags = [
         "-C",
         "opt-level=2",
@@ -232,6 +233,7 @@ fn normalize_ir(ir: &str) -> String {
         }
         line = normalize_alloc_names(&line);
         line = normalize_panic_location(&line);
+        line = normalize_llvm_directories(&line);
         line = normalize_commutative_add(&line);
         lines.push(line);
     }
@@ -280,6 +282,22 @@ fn normalize_panic_location(line: &str) -> String {
     let end = start + 2 + end_offset + 1;
     let mut result = line.to_string();
     result.replace_range(start..end, "c\\\"LOC\\\"");
+    result
+}
+
+fn normalize_llvm_directories(line: &str) -> String {
+    let marker = "directory: \"";
+    let mut result = line.to_string();
+    let mut search_from = 0usize;
+    while let Some(relative) = result[search_from..].find(marker) {
+        let content_start = search_from + relative + marker.len();
+        let Some(end_offset) = result[content_start..].find('"') else {
+            break;
+        };
+        let content_end = content_start + end_offset;
+        result.replace_range(content_start..content_end, "/SRC");
+        search_from = content_start + "/SRC".len();
+    }
     result
 }
 
