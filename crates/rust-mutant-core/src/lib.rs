@@ -7,7 +7,7 @@
 use anyhow::{Context, Result, anyhow, bail};
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs;
 #[cfg(unix)]
 use std::os::unix::process::CommandExt;
@@ -25,6 +25,7 @@ use walkdir::WalkDir;
 
 pub const SCHEMA_VERSION: u32 = 1;
 const CACHE_SCHEMA_VERSION: u32 = 2;
+static PEAK_RSS_MIB: AtomicU64 = AtomicU64::new(0);
 pub const GENERIC_FAMILIES: [&str; 10] = [
     "AOR",
     "AOD",
@@ -1146,9 +1147,11 @@ pub fn run(options: &RunOptions) -> Result<Report> {
     let effective_workers = options.requested_workers.min(global_cpu_budget).max(1);
     let memory_budget = memory_budget(options.max_memory_mib);
     let rss_before = current_rss_mib();
+    PEAK_RSS_MIB.store(rss_before, Ordering::Relaxed);
     let throttled_before = memory_budget.is_some_and(|budget| rss_before > budget);
     let cache = CacheStore::new(&project);
     let cache_hits = AtomicUsize::new(0);
+    let memory_wait_ms = AtomicU64::new(0);
     let execution_started = Instant::now();
     let pool = rayon::ThreadPoolBuilder::new()
         .num_threads(effective_workers)
@@ -1158,6 +1161,8 @@ pub fn run(options: &RunOptions) -> Result<Report> {
         mutants
             .into_par_iter()
             .map(|mutant| {
+                let waited = wait_for_memory(memory_budget);
+                memory_wait_ms.fetch_add(waited, Ordering::Relaxed);
                 let selected = if options.routing {
                     routing.tests_for(&mutant.file, mutant.line)
                 } else {
@@ -1184,8 +1189,9 @@ pub fn run(options: &RunOptions) -> Result<Report> {
     let summary = summarize(&results, options.threshold);
     let total_ms = started.elapsed().as_millis();
     let rss = current_rss_mib();
+    let peak_rss = PEAK_RSS_MIB.load(Ordering::Relaxed).max(rss);
     let throttled = throttled_before || memory_budget.is_some_and(|budget| rss > budget);
-    let wait_ms = session.wait_ms;
+    let wait_ms = session.wait_ms + u128::from(memory_wait_ms.load(Ordering::Relaxed));
     drop(session);
     Ok(Report {
         schema_version: SCHEMA_VERSION,
@@ -1212,7 +1218,7 @@ pub fn run(options: &RunOptions) -> Result<Report> {
             global_cpu_budget,
             active_sessions: 1,
             memory_budget_mib: memory_budget,
-            peak_rss_mib: rss,
+            peak_rss_mib: peak_rss,
             wait_ms,
             throttled,
         },
@@ -1313,15 +1319,24 @@ fn execute_one(
     options: &RunOptions,
     cache: &CacheStore,
     cache_hits: &AtomicUsize,
-    _changed: Option<&BTreeSet<String>>,
+    changed: Option<&BTreeSet<String>>,
 ) -> Result<MutantResult> {
     let started = Instant::now();
     let key = cache.key(project, &mutant, selected, options, timeout)?;
-    if !options.no_cache
-        && let Some(cached) = cache.load(&key)?
-    {
+    let cached = if options.no_cache {
+        None
+    } else {
+        cache.load(&key)?
+    };
+    if let Some(cached) = cached {
         cache_hits.fetch_add(1, Ordering::Relaxed);
         return Ok(cached.into_result(mutant, "hit"));
+    }
+    if changed.is_some_and(|files| !files.contains(&mutant.file)) {
+        bail!(
+            "incremental cache miss for unchanged source file {}",
+            mutant.file
+        );
     }
     let line_directive = mutant.source_line.to_ascii_lowercase();
     if line_directive.contains("rust-mutant: not-covered") {
@@ -1359,7 +1374,10 @@ fn execute_one(
     }
     source.replace_range(mutant.start_byte..mutant.end_byte, &mutant.replacement);
     fs::write(&target_file, source)?;
-    let mutant_target_dir = target_dir.join(format!("mutant-{}", mutant.id));
+    let mutant_target_dir = target_dir.join(format!(
+        "worker-{}",
+        rayon::current_thread_index().unwrap_or(0)
+    ));
     let scratch_manifest = scratch.join(manifest.file_name().unwrap_or_default());
     let cases = if selected.is_empty() {
         vec![None]
@@ -1655,31 +1673,53 @@ fn changed_source_files(project: &Path, base_ref: &str) -> Result<BTreeSet<Strin
 }
 
 fn effective_cpu_capacity() -> usize {
-    if let Ok(status) = fs::read_to_string("/proc/self/status")
-        && let Some(value) = status
-            .lines()
-            .find_map(|line| line.strip_prefix("Cpus_allowed_list:\t"))
-    {
-        let count = value
-            .split(',')
-            .map(|part| {
-                let mut range = part.split('-');
-                let start = range
-                    .next()
-                    .and_then(|x| x.parse::<usize>().ok())
-                    .unwrap_or(0);
-                let end = range
-                    .next()
-                    .and_then(|x| x.parse::<usize>().ok())
-                    .unwrap_or(start);
-                end.saturating_sub(start) + 1
-            })
-            .sum::<usize>();
-        if count > 0 {
-            return count;
-        }
-    }
-    std::thread::available_parallelism().map_or(1, |value| value.get())
+    let affinity = fs::read_to_string("/proc/self/status")
+        .ok()
+        .and_then(|status| {
+            status
+                .lines()
+                .find_map(|line| line.strip_prefix("Cpus_allowed_list:\t"))
+                .map(|value| {
+                    value
+                        .split(',')
+                        .map(|part| {
+                            let mut range = part.split('-');
+                            let start = range
+                                .next()
+                                .and_then(|x| x.parse::<usize>().ok())
+                                .unwrap_or(0);
+                            let end = range
+                                .next()
+                                .and_then(|x| x.parse::<usize>().ok())
+                                .unwrap_or(start);
+                            end.saturating_sub(start) + 1
+                        })
+                        .sum::<usize>()
+                })
+                .filter(|count| *count > 0)
+        });
+    let quota = fs::read_to_string("/sys/fs/cgroup/cpu.max")
+        .ok()
+        .and_then(|value| {
+            let mut fields = value.split_whitespace();
+            let quota = fields.next()?;
+            let period = fields.next()?.parse::<u64>().ok()?;
+            if quota == "max" || period == 0 {
+                return None;
+            }
+            let quota = quota.parse::<u64>().ok()?;
+            Some((quota / period).max(1) as usize)
+        });
+    affinity
+        .into_iter()
+        .chain(quota)
+        .min()
+        .or_else(|| {
+            std::thread::available_parallelism()
+                .ok()
+                .map(|value| value.get())
+        })
+        .unwrap_or(1)
 }
 
 fn memory_budget(requested: Option<u64>) -> Option<u64> {
@@ -1696,18 +1736,75 @@ fn memory_budget(requested: Option<u64>) -> Option<u64> {
     Some(requested.map_or(ceiling, |value| value.min(ceiling)))
 }
 
+fn wait_for_memory(budget: Option<u64>) -> u64 {
+    let started = Instant::now();
+    if let Some(limit) = budget {
+        while current_rss_mib() > limit && started.elapsed() < Duration::from_millis(250) {
+            record_peak_rss();
+            thread::sleep(Duration::from_millis(25));
+        }
+    }
+    record_peak_rss();
+    started.elapsed().as_millis() as u64
+}
+
+fn record_peak_rss() {
+    let rss = current_rss_mib();
+    PEAK_RSS_MIB.fetch_max(rss, Ordering::Relaxed);
+}
+
 fn current_rss_mib() -> u64 {
-    fs::read_to_string("/proc/self/status")
-        .ok()
-        .and_then(|status| {
-            status.lines().find_map(|line| {
-                line.strip_prefix("VmRSS:")
-                    .and_then(|value| value.split_whitespace().next())
-                    .and_then(|value| value.parse::<u64>().ok())
-                    .map(|kib| kib / 1024)
-            })
-        })
-        .unwrap_or(0)
+    let root = std::process::id();
+    let mut processes = HashMap::new();
+    let Ok(entries) = fs::read_dir("/proc") else {
+        return 0;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else {
+            continue;
+        };
+        let Ok(pid) = name.parse::<u32>() else {
+            continue;
+        };
+        let Ok(status) = fs::read_to_string(entry.path().join("status")) else {
+            continue;
+        };
+        let mut parent = None;
+        let mut rss_kib = None;
+        for line in status.lines() {
+            if let Some(value) = line.strip_prefix("PPid:") {
+                parent = value.trim().parse::<u32>().ok();
+            } else if let Some(value) = line.strip_prefix("VmRSS:") {
+                rss_kib = value.split_whitespace().next().and_then(|v| v.parse().ok());
+            }
+        }
+        if let (Some(parent), Some(rss_kib)) = (parent, rss_kib) {
+            processes.insert(pid, (parent, rss_kib));
+        }
+    }
+    let mut total_kib = 0u64;
+    for (&pid, &(_, rss_kib)) in &processes {
+        let mut current = pid;
+        let mut visited = BTreeSet::new();
+        loop {
+            if current == root {
+                total_kib = total_kib.saturating_add(rss_kib);
+                break;
+            }
+            if !visited.insert(current) {
+                break;
+            }
+            let Some(&(parent, _)) = processes.get(&current) else {
+                break;
+            };
+            if parent == 0 || parent == current {
+                break;
+            }
+            current = parent;
+        }
+    }
+    (total_kib / 1024).max(1)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -2268,6 +2365,7 @@ fn wait_child(child: &mut Child, timeout: Duration) -> Result<CommandResult> {
     let start = Instant::now();
     let mut timed_out = false;
     loop {
+        record_peak_rss();
         if let Some(status) = child.try_wait()? {
             let mut stdout = String::new();
             let mut stderr = String::new();
@@ -2365,6 +2463,14 @@ fn stable_path_hash(path: &Path) -> u64 {
 
 fn stable_diagnostic(value: &str) -> String {
     let mut result = value.to_string();
+    let scratch_prefix = "/tmp/rust-mutant-scratch-";
+    while let Some(start) = result.find(scratch_prefix) {
+        let suffix_start = start + scratch_prefix.len();
+        let end = result[suffix_start..]
+            .find('/')
+            .map_or(result.len(), |offset| suffix_start + offset);
+        result.replace_range(start..end, "/tmp/rust-mutant-scratch");
+    }
     let mut search_from = 0usize;
     while let Some(relative) = result[search_from..].find("thread '") {
         let start = search_from + relative;
