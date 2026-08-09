@@ -8,7 +8,7 @@ use anyhow::{Context, Result, anyhow, bail};
 use rayon::prelude::*;
 use rust_mutant_tce::TceResult;
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fs;
 #[cfg(unix)]
 use std::os::unix::process::CommandExt;
@@ -326,6 +326,7 @@ fn discover_file(
     filter: Option<&BTreeSet<String>>,
 ) -> Vec<Mutant> {
     let bytes = masked;
+    let relational_operators = relational_operator_positions(source);
     let mut out = Vec::new();
     let mut i = 0usize;
     while i < bytes.len() {
@@ -400,18 +401,20 @@ fn discover_file(
                     "!=" => "==",
                     _ => "<",
                 };
-                push_if(
-                    &mut out,
-                    source,
-                    file,
-                    i,
-                    i + 2,
-                    op,
-                    replacement,
-                    "ROR",
-                    "relational-swap",
-                    filter,
-                );
+                if relational_operators.contains(&i) {
+                    push_if(
+                        &mut out,
+                        source,
+                        file,
+                        i,
+                        i + 2,
+                        op,
+                        replacement,
+                        "ROR",
+                        "relational-swap",
+                        filter,
+                    );
+                }
                 i += 2;
                 continue;
             }
@@ -505,7 +508,10 @@ fn discover_file(
             i += 1;
             continue;
         }
-        if matches!(one, '<' | '>') && relational_position(bytes, i) {
+        if matches!(one, '<' | '>')
+            && relational_operators.contains(&i)
+            && relational_position(bytes, i)
+        {
             let op = one.to_string();
             let replacement = if one == '<' { ">" } else { "<" };
             push_if(
@@ -991,6 +997,37 @@ fn relational_position(bytes: &[u8], i: usize) -> bool {
     let next = next_non_space(bytes, i + 1);
     prev.is_some_and(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b')')
         && next.is_some_and(|b| b.is_ascii_alphanumeric() || b == b'_')
+}
+
+fn relational_operator_positions(source: &str) -> HashSet<usize> {
+    let mut parser = Parser::new();
+    parser
+        .set_language(&tree_sitter_rust::LANGUAGE.into())
+        .expect("tree-sitter-rust language should load");
+    let Some(tree) = parser.parse(source, None) else {
+        return HashSet::new();
+    };
+
+    let mut positions = HashSet::new();
+    collect_relational_operator_positions(tree.root_node(), &mut positions);
+    positions
+}
+
+fn collect_relational_operator_positions(
+    node: tree_sitter::Node<'_>,
+    positions: &mut HashSet<usize>,
+) {
+    if node.kind() == "binary_expression"
+        && let Some(operator) = node.child_by_field_name("operator")
+        && matches!(operator.kind(), "<" | ">" | "<=" | ">=" | "==" | "!=")
+    {
+        positions.insert(operator.start_byte());
+    }
+
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        collect_relational_operator_positions(child, positions);
+    }
 }
 
 fn rhs_is_integer(bytes: &[u8], mut i: usize) -> bool {
@@ -2781,6 +2818,42 @@ mod tests {
         let second = discover_file(source, &masked, "src/lib.rs", None);
         assert_eq!(first.len(), second.len());
         assert!(!first.iter().any(|m| m.line == 1));
+    }
+
+    #[test]
+    fn ror_only_targets_binary_expression_operators() {
+        let source = r#"
+struct ProbeEntry;
+
+fn probe(left: usize, right: usize) {
+    let _vec: Vec<ProbeEntry> = Vec::new();
+    let _option: Option<ProbeEntry> = None;
+    let _nested: Result<Option<ProbeEntry>, ProbeEntry> = Ok(None);
+    let _map: std::collections::HashMap<usize, ProbeEntry> = std::collections::HashMap::new();
+    let _turbofish = Option::<ProbeEntry>::None;
+    let _lt = left < right;
+    let _gt = left > right;
+    let _le = left <= right;
+    let _ge = left >= right;
+    let _eq = left == right;
+    let _ne = left != right;
+}
+"#;
+        let masked = mask_non_code(source.as_bytes());
+        let mutants = discover_file(source, &masked, "src/lib.rs", None);
+        let ror = mutants
+            .iter()
+            .filter(|mutant| mutant.family == "ROR")
+            .collect::<Vec<_>>();
+
+        assert_eq!(ror.len(), 6, "unexpected ROR mutants: {ror:?}");
+        assert_eq!(
+            ror.iter()
+                .map(|mutant| mutant.original.as_str())
+                .collect::<Vec<_>>(),
+            vec!["<", ">", "<=", ">=", "==", "!="]
+        );
+        assert!(ror.iter().all(|mutant| mutant.source_line.contains("left")));
     }
 
     #[test]
