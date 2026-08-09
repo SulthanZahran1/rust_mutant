@@ -1,6 +1,6 @@
 # GOAL 0.1.0: rust_mutant engine skeleton
 
-> **Status:** 🔒 **locked** (locked 2026-08-09 by human — criteria frozen; changes require human renegotiation). See Human check.
+> **Status:** ✅ **signed-off** (signed off 2026-08-09 by human after the live M1 receipt review). Criteria remain frozen; changes require human renegotiation. See Human check.
 > **Prerequisite:** none.
 > **Scope decided in [GOAL milestone boundaries + fixture sizing contract](https://github.com/SulthanZahran1/rust_mutant/issues/8):** M1 is the end-to-end engine skeleton plus the 10 generic table-stakes families. No Rust-idiomatic families, speed features, TCE, reports, or distribution yet.
 

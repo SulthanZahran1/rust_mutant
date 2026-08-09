@@ -7,8 +7,8 @@
 
 | Document | Version | Focus | State | Human check |
 |---|---:|---|---|---|
-| [GOAL-1.md](GOAL-1.md) | `0.1.0` | Engine skeleton and generic operators | 🔒 locked | End-to-end mutation run on a small Rust fixture |
-| [GOAL-2.md](GOAL-2.md) | `0.2.0` | Rust-idiomatic operators and fixture contract | draft | All 18 families and all fixture buckets live |
+| [GOAL-1.md](GOAL-1.md) | `0.1.0` | Engine skeleton and generic operators | ✅ signed-off | End-to-end mutation run on a small Rust fixture |
+| [GOAL-2.md](GOAL-2.md) | `0.2.0` | Rust-idiomatic operators and fixture contract | ✅ signed-off | All 18 families and all fixture buckets live |
 | [GOAL-3.md](GOAL-3.md) | `0.3.0` | Routing, timeouts, parallelism, cache, incremental mode | draft | Routing correctness and warm-cache demo |
 | [GOAL-4.md](GOAL-4.md) | `1.0.0` | TCE, reports, frozen contract, distribution | draft | Full release demo on Linux and Windows |
 
@@ -28,7 +28,6 @@
 
 ## Pending draft amendments
 
-- **GOAL-1 fixture shape:** During milestone discussion, the human chose a mixed-outcome small fixture: 12–15 mutants with all five initial outcome buckets present. Generic-family discovery is verified separately through an M1 operator-probe fixture/suite. This supersedes the pure `100% killed / 0% compile_error` small-fixture wording in the next draft. The amendment must be recorded against issue #8 before GOAL-1 is locked.
 - **GOAL-4 TCE mode:** During milestone discussion, the human chose automatic post-survival LLVM-IR TCE by default, with `--no-tce` as the escape hatch. This supersedes the earlier opt-in wording in the provisional CLI/architecture notes and must be frozen with the final contract in M4.
 
 ## Canonical fixture roles
