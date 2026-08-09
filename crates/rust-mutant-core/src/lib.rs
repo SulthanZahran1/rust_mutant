@@ -30,6 +30,36 @@ pub const GENERIC_FAMILIES: [&str; 10] = [
     "RVR",
     "loop-inc-dec",
 ];
+pub const IDIOMATIC_FAMILIES: [&str; 8] = [
+    "question-mark-removal",
+    "unwrap-expect-removal",
+    "await-removal",
+    "move-closure-removal",
+    "mut-to-shared",
+    "clone-removal",
+    "arc-rc-swap",
+    "iterator-chain",
+];
+pub const PUBLIC_FAMILIES: [&str; 18] = [
+    "AOR",
+    "AOD",
+    "AOI",
+    "ROR",
+    "LOR",
+    "LCR",
+    "COR",
+    "SDL",
+    "RVR",
+    "loop-inc-dec",
+    "question-mark-removal",
+    "unwrap-expect-removal",
+    "await-removal",
+    "move-closure-removal",
+    "mut-to-shared",
+    "clone-removal",
+    "arc-rc-swap",
+    "iterator-chain",
+];
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -176,12 +206,12 @@ impl Default for RunOptions {
 }
 
 pub fn operator_families() -> &'static [&'static str] {
-    &GENERIC_FAMILIES
+    &PUBLIC_FAMILIES
 }
 
 pub fn validate_operator_filter(filter: &BTreeSet<String>) -> Result<()> {
     for family in filter {
-        if !GENERIC_FAMILIES
+        if !PUBLIC_FAMILIES
             .iter()
             .any(|known| known.eq_ignore_ascii_case(family))
         {
@@ -272,6 +302,10 @@ fn discover_file(
             None
         };
         if let Some((op, len, _)) = family_and_len {
+            if op == "||" && is_closure_pipe(bytes, i) {
+                i += len;
+                continue;
+            }
             let other = if op == "&&" { "||" } else { "&&" };
             push_if(
                 &mut out,
@@ -433,7 +467,268 @@ fn discover_file(
         i += 1;
     }
     discover_line_mutants(source, file, filter, &mut out);
+    discover_idiomatic_mutants(source, masked, file, filter, &mut out);
     out
+}
+
+/// Discover the Rust-idiomatic M2 operators with byte-stable, syntax-first
+/// edits. The masked buffer has the same byte length as `source`, so every
+/// range can be checked against the original source by `push_if`. Semantic
+/// invalidity is deliberately left to Cargo and is reported as
+/// `compile_error`, rather than making the scanner invent type information.
+fn discover_idiomatic_mutants(
+    source: &str,
+    masked: &[u8],
+    file: &str,
+    filter: Option<&BTreeSet<String>>,
+    out: &mut Vec<Mutant>,
+) {
+    let bytes = masked;
+    let mut i = 0usize;
+    while i < bytes.len() {
+        if bytes[i] == b'?' && (i == 0 || bytes[i - 1] != b'?') {
+            push_if(
+                out,
+                source,
+                file,
+                i,
+                i + 1,
+                "?",
+                "",
+                "question-mark-removal",
+                "try-suffix-removal",
+                filter,
+            );
+            i += 1;
+            continue;
+        }
+        if bytes[i..].starts_with(b".unwrap()") {
+            push_if(
+                out,
+                source,
+                file,
+                i,
+                i + b".unwrap()".len(),
+                ".unwrap()",
+                "",
+                "unwrap-expect-removal",
+                "unwrap-removal",
+                filter,
+            );
+            i += b".unwrap()".len();
+            continue;
+        }
+        if bytes[i..].starts_with(b".expect(") {
+            let mut end = i + b".expect(".len();
+            let mut depth = 1usize;
+            while end < bytes.len() {
+                match bytes[end] {
+                    b'(' => depth += 1,
+                    b')' => {
+                        depth -= 1;
+                        if depth == 0 {
+                            end += 1;
+                            break;
+                        }
+                    }
+                    _ => {}
+                }
+                end += 1;
+            }
+            if depth == 0 {
+                push_if(
+                    out,
+                    source,
+                    file,
+                    i,
+                    end,
+                    &source[i..end],
+                    "",
+                    "unwrap-expect-removal",
+                    "expect-removal",
+                    filter,
+                );
+                i = end;
+                continue;
+            }
+        }
+        if bytes[i..].starts_with(b".await") {
+            push_if(
+                out,
+                source,
+                file,
+                i,
+                i + b".await".len(),
+                ".await",
+                "",
+                "await-removal",
+                "await-suffix-removal",
+                filter,
+            );
+            i += b".await".len();
+            continue;
+        }
+        if bytes[i..].starts_with(b"move")
+            && (i == 0 || !is_identifier_byte(bytes[i - 1]))
+            && (i + 4 == bytes.len() || !is_identifier_byte(bytes[i + 4]))
+        {
+            let mut end = i + 4;
+            while end < bytes.len() && bytes[end].is_ascii_whitespace() {
+                end += 1;
+            }
+            if end < bytes.len() && bytes[end] == b'|' {
+                push_if(
+                    out,
+                    source,
+                    file,
+                    i,
+                    i + 4,
+                    "move",
+                    "",
+                    "move-closure-removal",
+                    "closure-move-removal",
+                    filter,
+                );
+                i += 4;
+                continue;
+            }
+        }
+        if bytes[i..].starts_with(b"&mut")
+            && (i + 4 == bytes.len() || !is_identifier_byte(bytes[i + 4]))
+        {
+            push_if(
+                out,
+                source,
+                file,
+                i,
+                i + 4,
+                "&mut",
+                "&",
+                "mut-to-shared",
+                "mutable-reference-removal",
+                filter,
+            );
+            i += 4;
+            continue;
+        }
+        if bytes[i..].starts_with(b".clone()") {
+            push_if(
+                out,
+                source,
+                file,
+                i,
+                i + b".clone()".len(),
+                ".clone()",
+                "",
+                "clone-removal",
+                "clone-call-removal",
+                filter,
+            );
+            i += b".clone()".len();
+            continue;
+        }
+        if bytes[i..].starts_with(b"std::sync::Arc") {
+            push_if(
+                out,
+                source,
+                file,
+                i,
+                i + b"std::sync::Arc".len(),
+                "std::sync::Arc",
+                "std::rc::Rc",
+                "arc-rc-swap",
+                "arc-to-rc",
+                filter,
+            );
+            i += b"std::sync::Arc".len();
+            continue;
+        }
+        if bytes[i..].starts_with(b"std::rc::Rc") {
+            push_if(
+                out,
+                source,
+                file,
+                i,
+                i + b"std::rc::Rc".len(),
+                "std::rc::Rc",
+                "std::sync::Arc",
+                "arc-rc-swap",
+                "rc-to-arc",
+                filter,
+            );
+            i += b"std::rc::Rc".len();
+            continue;
+        }
+        if bytes[i..].starts_with(b".map(") {
+            push_if(
+                out,
+                source,
+                file,
+                i,
+                i + b".map".len(),
+                ".map",
+                ".filter",
+                "iterator-chain",
+                "map-to-filter",
+                filter,
+            );
+            i += b".map".len();
+            continue;
+        }
+        if bytes[i..].starts_with(b".filter(") {
+            push_if(
+                out,
+                source,
+                file,
+                i,
+                i + b".filter".len(),
+                ".filter",
+                ".map",
+                "iterator-chain",
+                "filter-to-map",
+                filter,
+            );
+            i += b".filter".len();
+            continue;
+        }
+        if bytes[i..].starts_with(b".collect::<Vec<_>>()") {
+            push_if(
+                out,
+                source,
+                file,
+                i,
+                i + b".collect::<Vec<_>>()".len(),
+                ".collect::<Vec<_>>()",
+                ".count()",
+                "iterator-chain",
+                "collect-to-count",
+                filter,
+            );
+            i += b".collect::<Vec<_>>()".len();
+            continue;
+        }
+        if bytes[i..].starts_with(b".collect()") {
+            push_if(
+                out,
+                source,
+                file,
+                i,
+                i + b".collect()".len(),
+                ".collect()",
+                ".count()",
+                "iterator-chain",
+                "collect-to-count",
+                filter,
+            );
+            i += b".collect()".len();
+            continue;
+        }
+        i += 1;
+    }
+}
+
+fn is_identifier_byte(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || byte == b'_'
 }
 
 fn discover_line_mutants(
@@ -445,7 +740,8 @@ fn discover_line_mutants(
     let mut offset = 0usize;
     for line in source.split_inclusive('\n') {
         let content = line.trim_end_matches(['\n', '\r']);
-        let trimmed = content.trim();
+        let code_content = content.split("//").next().unwrap_or(content).trim_end();
+        let trimmed = code_content.trim();
         if trimmed.contains("return ") && trimmed.ends_with(';') {
             if let Some(pos) = content.find("return ") {
                 let expr_start = pos + "return ".len();
@@ -583,6 +879,12 @@ fn relational_position(bytes: &[u8], i: usize) -> bool {
     if i > 0 && bytes[i - 1] == b'=' {
         return false;
     }
+    if i > 0 && bytes[i - 1] == b':' {
+        return false;
+    }
+    if i + 2 < bytes.len() && bytes[i] == b'<' && bytes[i + 1] == b'_' && bytes[i + 2] == b'>' {
+        return false;
+    }
     let prev = previous_non_space(bytes, i);
     let next = next_non_space(bytes, i + 1);
     prev.is_some_and(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b')')
@@ -645,6 +947,22 @@ fn mask_non_code(input: &[u8]) -> Vec<u8> {
             }
             continue;
         }
+        if input[i] == b'\'' {
+            let mut cursor = i + 1;
+            if cursor < input.len()
+                && (input[cursor].is_ascii_alphabetic() || input[cursor] == b'_')
+            {
+                while cursor < input.len()
+                    && (input[cursor].is_ascii_alphanumeric() || input[cursor] == b'_')
+                {
+                    cursor += 1;
+                }
+                if cursor == input.len() || input[cursor] != b'\'' {
+                    i += 1;
+                    continue;
+                }
+            }
+        }
         if input[i] == b'"' || input[i] == b'\'' {
             let quote = input[i];
             let start = i;
@@ -670,6 +988,27 @@ fn mask_non_code(input: &[u8]) -> Vec<u8> {
         i += 1;
     }
     out
+}
+
+fn is_closure_pipe(bytes: &[u8], index: usize) -> bool {
+    let mut cursor = index;
+    while cursor > 0 && bytes[cursor - 1].is_ascii_whitespace() {
+        cursor -= 1;
+    }
+    if cursor == 0 {
+        return true;
+    }
+    let previous = bytes[cursor - 1];
+    if matches!(previous, b'=' | b'(' | b'[' | b'{' | b',' | b':') {
+        return true;
+    }
+    let mut word_start = cursor;
+    while word_start > 0
+        && (bytes[word_start - 1].is_ascii_alphanumeric() || bytes[word_start - 1] == b'_')
+    {
+        word_start -= 1;
+    }
+    &bytes[word_start..cursor] == b"move"
 }
 
 fn stable_id(m: &Mutant) -> String {
@@ -723,6 +1062,10 @@ pub fn run(options: &RunOptions) -> Result<Report> {
         bail!("no mutants found after operator filters");
     }
     let target_dir = external_target_dir(&project);
+    if target_dir.exists() {
+        fs::remove_dir_all(&target_dir)
+            .with_context(|| format!("clean mutation target {}", target_dir.display()))?;
+    }
     let baseline = cargo_test(
         &project,
         &manifest,
@@ -1156,6 +1499,7 @@ mod tests {
     fn generic_operator_names_are_stable() {
         assert_eq!(GENERIC_FAMILIES.len(), 10);
         assert_eq!(GENERIC_FAMILIES[9], "loop-inc-dec");
+        assert_eq!(PUBLIC_FAMILIES.len(), 18);
     }
 
     #[test]
@@ -1200,5 +1544,59 @@ mod tests {
             });
         }
         assert_eq!(summarize(&results, None).msi, 50.0);
+    }
+
+    #[test]
+    fn idiomatic_families_have_source_pairs() {
+        let source = r#"
+async fn probes() {
+    let _ = Some(()).unwrap();
+    let _ = Some(()).expect("ok");
+    async { 1_i32 }.await;
+    let closure = move || 1_i32;
+    let mut value = 1_i32;
+    let _ = &mut value;
+    let _ = (1_i32).clone();
+    let _ = std::sync::Arc::new(1_i32);
+    let _ = vec![1_i32].into_iter().map(|_| true).count();
+    let _ = vec![1_i32].into_iter().filter(|_| true).count();
+    let _ = vec![1_i32].into_iter().collect::<Vec<_>>();
+}
+fn optional_probe() -> Option<()> {
+    Some(())?;
+    Some(())
+}
+"#;
+        let masked = mask_non_code(source.as_bytes());
+        let mutants = discover_file(source, &masked, "src/probes.rs", None);
+        let pairs = [
+            ("question-mark-removal", "?", ""),
+            ("unwrap-expect-removal", ".unwrap()", ""),
+            ("unwrap-expect-removal", ".expect(\"ok\")", ""),
+            ("await-removal", ".await", ""),
+            ("move-closure-removal", "move", ""),
+            ("mut-to-shared", "&mut", "&"),
+            ("clone-removal", ".clone()", ""),
+            ("arc-rc-swap", "std::sync::Arc", "std::rc::Rc"),
+            ("iterator-chain", ".map", ".filter"),
+            ("iterator-chain", ".filter", ".map"),
+            ("iterator-chain", ".collect::<Vec<_>>()", ".count()"),
+        ];
+        for (family, original, replacement) in pairs {
+            assert!(
+                mutants.iter().any(|mutant| {
+                    mutant.family == family
+                        && mutant.original == original
+                        && mutant.replacement == replacement
+                }),
+                "missing source pair {family}: {original:?} -> {replacement:?}"
+            );
+        }
+        assert!(!mutants.iter().any(|mutant| mutant.family == "LOR"));
+        assert!(
+            !mutants
+                .iter()
+                .any(|mutant| mutant.family == "ROR" && mutant.original == "<")
+        );
     }
 }

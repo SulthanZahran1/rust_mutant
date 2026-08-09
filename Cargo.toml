@@ -10,6 +10,8 @@ members = [
 exclude = [
     "tests/fixtures/small",
     "tests/fixtures/operator-probes",
+    "tests/fixtures/medium",
+    "tests/fixtures/large",
 ]
 
 [workspace.package]
