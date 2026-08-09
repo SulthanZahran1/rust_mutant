@@ -1518,7 +1518,7 @@ impl CachedOutcome {
             duration_ms: 0,
             cache: cache.into(),
             command: self.command,
-            details: self.details,
+            details: self.details.map(|details| stable_diagnostic(&details)),
         }
     }
 }
@@ -2506,8 +2506,15 @@ fn stable_diagnostic(value: &str) -> String {
             let duration_start = start + "finished in ".len();
             if let Some(end_offset) = line[duration_start..].find('s') {
                 let end = duration_start + end_offset + 1;
-                line.replace_range(duration_start..end, "finished in duration");
+                line.replace_range(duration_start..end, "duration");
             }
+        }
+        if let Some(start) = line.find("Summary [")
+            && let Some(end_offset) = line[start + "Summary [".len()..].find(']')
+        {
+            let duration_start = start + "Summary [".len();
+            let end = duration_start + end_offset;
+            line.replace_range(duration_start..end, "duration");
         }
         if line.starts_with("error: could not compile") {
             compile_errors.push(line);
