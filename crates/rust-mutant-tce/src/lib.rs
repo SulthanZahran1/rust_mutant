@@ -232,6 +232,7 @@ fn normalize_ir(ir: &str) -> String {
             line = "ModuleID = 'MODULE'".into();
         }
         line = normalize_alloc_names(&line);
+        line = normalize_crate_disambiguators(&line);
         line = normalize_panic_location(&line);
         line = normalize_llvm_directories(&line);
         line = normalize_commutative_add(&line);
@@ -282,6 +283,29 @@ fn normalize_panic_location(line: &str) -> String {
     let end = start + 2 + end_offset + 1;
     let mut result = line.to_string();
     result.replace_range(start..end, "c\\\"LOC\\\"");
+    result
+}
+
+fn normalize_crate_disambiguators(line: &str) -> String {
+    let bytes = line.as_bytes();
+    let mut result = String::with_capacity(line.len());
+    let mut index = 0usize;
+    while index < bytes.len() {
+        if bytes[index..].starts_with(b"Cs") {
+            let hash_start = index + 2;
+            let mut hash_end = hash_start;
+            while hash_end < bytes.len() && bytes[hash_end].is_ascii_alphanumeric() {
+                hash_end += 1;
+            }
+            if hash_end > hash_start && hash_end < bytes.len() && bytes[hash_end] == b'_' {
+                result.push_str("CsHASH");
+                index = hash_end;
+                continue;
+            }
+        }
+        result.push(bytes[index] as char);
+        index += 1;
+    }
     result
 }
 
