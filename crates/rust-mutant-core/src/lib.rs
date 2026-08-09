@@ -5,6 +5,7 @@
 //! compiler remains the authority for semantic validity.
 
 use anyhow::{Context, Result, anyhow, bail};
+use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
@@ -12,6 +13,8 @@ use std::fs;
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
+use std::sync::OnceLock;
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use std::{
     io::{Read, Write},
@@ -21,6 +24,7 @@ use tree_sitter::Parser;
 use walkdir::WalkDir;
 
 pub const SCHEMA_VERSION: u32 = 1;
+const CACHE_SCHEMA_VERSION: u32 = 2;
 pub const GENERIC_FAMILIES: [&str; 10] = [
     "AOR",
     "AOD",
@@ -1137,39 +1141,50 @@ pub fn run(options: &RunOptions) -> Result<Report> {
     } else {
         options.timeout
     };
-    let cache_started = Instant::now();
-    let mut cache = CacheStore::new(&project);
-    let execution_started = Instant::now();
-    let mut results = Vec::with_capacity(mutants.len());
-    for mutant in mutants {
-        let selected = if options.routing {
-            routing.tests_for(&mutant.file, mutant.line)
-        } else {
-            Vec::new()
-        };
-        let result = execute_one(
-            &project,
-            &manifest,
-            &target_dir,
-            mutant,
-            &selected,
-            mutant_timeout,
-            options,
-            &mut cache,
-            changed.as_ref(),
-        )?;
-        results.push(result);
-    }
-    results.sort_by(|a, b| a.mutant.id.cmp(&b.mutant.id));
-    let execution_ms = execution_started.elapsed().as_millis();
-    let summary = summarize(&results, options.threshold);
-    let total_ms = started.elapsed().as_millis();
     let capacity = effective_cpu_capacity();
     let global_cpu_budget = (capacity.saturating_mul(3) / 4).max(1);
     let effective_workers = options.requested_workers.min(global_cpu_budget).max(1);
     let memory_budget = memory_budget(options.max_memory_mib);
+    let rss_before = current_rss_mib();
+    let throttled_before = memory_budget.is_some_and(|budget| rss_before > budget);
+    let cache = CacheStore::new(&project);
+    let cache_hits = AtomicUsize::new(0);
+    let execution_started = Instant::now();
+    let pool = rayon::ThreadPoolBuilder::new()
+        .num_threads(effective_workers)
+        .thread_name(|index| format!("rust-mutant-worker-{index}"))
+        .build()?;
+    let results: Result<Vec<MutantResult>> = pool.install(|| {
+        mutants
+            .into_par_iter()
+            .map(|mutant| {
+                let selected = if options.routing {
+                    routing.tests_for(&mutant.file, mutant.line)
+                } else {
+                    Vec::new()
+                };
+                execute_one(
+                    &project,
+                    &manifest,
+                    &target_dir,
+                    mutant,
+                    &selected,
+                    mutant_timeout,
+                    options,
+                    &cache,
+                    &cache_hits,
+                    changed.as_ref(),
+                )
+            })
+            .collect()
+    });
+    let mut results = results?;
+    results.sort_by(|a, b| a.mutant.id.cmp(&b.mutant.id));
+    let execution_ms = execution_started.elapsed().as_millis();
+    let summary = summarize(&results, options.threshold);
+    let total_ms = started.elapsed().as_millis();
     let rss = current_rss_mib();
-    let throttled = memory_budget.is_some_and(|budget| rss > budget);
+    let throttled = throttled_before || memory_budget.is_some_and(|budget| rss > budget);
     let wait_ms = session.wait_ms;
     drop(session);
     Ok(Report {
@@ -1187,7 +1202,7 @@ pub fn run(options: &RunOptions) -> Result<Report> {
         timing: Timing {
             routing_ms,
             execution_ms,
-            cache_ms: cache_started.elapsed().as_millis().min(total_ms),
+            cache_ms: cache.cache_ms(),
             tce_ms: 0,
             total_ms,
         },
@@ -1208,7 +1223,7 @@ pub fn run(options: &RunOptions) -> Result<Report> {
             mapped_mutants: routing.mapped,
             full_suite_comparison: !options.routing,
         },
-        cache_hits: cache.hits,
+        cache_hits: cache_hits.load(Ordering::Relaxed),
     })
 }
 
@@ -1287,6 +1302,7 @@ fn report_for_discovery(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn execute_one(
     project: &Path,
     manifest: &Path,
@@ -1295,16 +1311,17 @@ fn execute_one(
     selected: &[TestCase],
     timeout: Duration,
     options: &RunOptions,
-    cache: &mut CacheStore,
+    cache: &CacheStore,
+    cache_hits: &AtomicUsize,
     _changed: Option<&BTreeSet<String>>,
 ) -> Result<MutantResult> {
     let started = Instant::now();
     let key = cache.key(project, &mutant, selected, options, timeout)?;
-    if !options.no_cache {
-        if let Some(cached) = cache.load(&key)? {
-            cache.hits += 1;
-            return Ok(cached.into_result(mutant, "hit"));
-        }
+    if !options.no_cache
+        && let Some(cached) = cache.load(&key)?
+    {
+        cache_hits.fetch_add(1, Ordering::Relaxed);
+        return Ok(cached.into_result(mutant, "hit"));
     }
     let line_directive = mutant.source_line.to_ascii_lowercase();
     if line_directive.contains("rust-mutant: not-covered") {
@@ -1342,6 +1359,7 @@ fn execute_one(
     }
     source.replace_range(mutant.start_byte..mutant.end_byte, &mutant.replacement);
     fs::write(&target_file, source)?;
+    let mutant_target_dir = target_dir.join(format!("mutant-{}", mutant.id));
     let scratch_manifest = scratch.join(manifest.file_name().unwrap_or_default());
     let cases = if selected.is_empty() {
         vec![None]
@@ -1356,11 +1374,23 @@ fn execute_one(
         let command = match case {
             Some(test) => {
                 tests_run.push(test.label.clone());
-                cargo_nextest(&scratch, &scratch_manifest, target_dir, timeout, Some(test))?
+                cargo_nextest(
+                    &scratch,
+                    &scratch_manifest,
+                    &mutant_target_dir,
+                    timeout,
+                    Some(test),
+                )?
             }
             None => {
                 tests_run.push("full-suite".into());
-                cargo_nextest(&scratch, &scratch_manifest, target_dir, timeout, None)?
+                cargo_nextest(
+                    &scratch,
+                    &scratch_manifest,
+                    &mutant_target_dir,
+                    timeout,
+                    None,
+                )?
             }
         };
         command_text = command.command.clone();
@@ -1478,7 +1508,7 @@ impl CachedOutcome {
 #[derive(Debug)]
 struct CacheStore {
     dir: PathBuf,
-    hits: usize,
+    cache_ms: AtomicU64,
 }
 
 impl CacheStore {
@@ -1487,7 +1517,7 @@ impl CacheStore {
             dir: std::env::temp_dir()
                 .join("rust-mutant-cache")
                 .join(format!("{:016x}", stable_path_hash(project))),
-            hits: 0,
+            cache_ms: AtomicU64::new(0),
         }
     }
 
@@ -1505,11 +1535,19 @@ impl CacheStore {
             timeout.as_millis().to_string()
         };
         let mut value = format!(
-            "schema={SCHEMA_VERSION};family={};id={};route={};timeout={timeout_key};",
-            mutant.family, mutant.id, options.routing
+            "cacheSchema={CACHE_SCHEMA_VERSION};engine={};toolchain={};family={};id={};route={};timeout={timeout_key};",
+            env!("CARGO_PKG_VERSION"),
+            toolchain_identity(),
+            mutant.family,
+            mutant.id,
+            options.routing
         );
         value.push_str(&hash_file(&project.join(&mutant.file))?);
         value.push_str(&hash_file(&project.join("Cargo.toml"))?);
+        let lockfile = project.join("Cargo.lock");
+        if lockfile.is_file() {
+            value.push_str(&hash_file(&lockfile)?);
+        }
         for entry in WalkDir::new(project.join("tests"))
             .follow_links(false)
             .into_iter()
@@ -1526,14 +1564,20 @@ impl CacheStore {
     }
 
     fn load(&self, key: &str) -> Result<Option<CachedOutcome>> {
+        let started = Instant::now();
         let path = self.dir.join(format!("{key}.json"));
-        if !path.is_file() {
-            return Ok(None);
-        }
-        Ok(Some(serde_json::from_slice(&fs::read(path)?)?))
+        let result = if !path.is_file() {
+            None
+        } else {
+            Some(serde_json::from_slice(&fs::read(path)?)?)
+        };
+        self.cache_ms
+            .fetch_add(started.elapsed().as_millis() as u64, Ordering::Relaxed);
+        Ok(result)
     }
 
     fn store(&self, key: &str, result: &MutantResult) -> Result<()> {
+        let started = Instant::now();
         fs::create_dir_all(&self.dir)?;
         let path = self.dir.join(format!("{key}.json"));
         let temp = self.dir.join(format!(".{key}.tmp-{}", std::process::id()));
@@ -1542,7 +1586,13 @@ impl CacheStore {
             serde_json::to_vec(&CachedOutcome::from_result(result))?,
         )?;
         fs::rename(temp, path)?;
+        self.cache_ms
+            .fetch_add(started.elapsed().as_millis() as u64, Ordering::Relaxed);
         Ok(())
+    }
+
+    fn cache_ms(&self) -> u128 {
+        u128::from(self.cache_ms.load(Ordering::Relaxed))
     }
 }
 
@@ -1560,6 +1610,25 @@ fn string_hash(value: &str) -> u64 {
         hash = hash.wrapping_mul(0x100000001b3);
     }
     hash
+}
+
+fn toolchain_identity() -> &'static str {
+    static IDENTITY: OnceLock<String> = OnceLock::new();
+    IDENTITY.get_or_init(|| {
+        let rustc = Command::new("rustc")
+            .arg("-vV")
+            .output()
+            .ok()
+            .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_string())
+            .unwrap_or_else(|| "rustc-unavailable".into());
+        let nextest = Command::new("cargo")
+            .args(["nextest", "--version"])
+            .output()
+            .ok()
+            .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_string())
+            .unwrap_or_else(|| "cargo-nextest-unavailable".into());
+        format!("{rustc}|{nextest}")
+    })
 }
 
 fn changed_source_files(project: &Path, base_ref: &str) -> Result<BTreeSet<String>> {
@@ -1586,29 +1655,28 @@ fn changed_source_files(project: &Path, base_ref: &str) -> Result<BTreeSet<Strin
 }
 
 fn effective_cpu_capacity() -> usize {
-    if let Ok(status) = fs::read_to_string("/proc/self/status") {
-        if let Some(value) = status
+    if let Ok(status) = fs::read_to_string("/proc/self/status")
+        && let Some(value) = status
             .lines()
             .find_map(|line| line.strip_prefix("Cpus_allowed_list:\t"))
-        {
-            let count = value
-                .split(',')
-                .map(|part| {
-                    let mut range = part.split('-');
-                    let start = range
-                        .next()
-                        .and_then(|x| x.parse::<usize>().ok())
-                        .unwrap_or(0);
-                    let end = range
-                        .next()
-                        .and_then(|x| x.parse::<usize>().ok())
-                        .unwrap_or(start);
-                    end.saturating_sub(start) + 1
-                })
-                .sum::<usize>();
-            if count > 0 {
-                return count;
-            }
+    {
+        let count = value
+            .split(',')
+            .map(|part| {
+                let mut range = part.split('-');
+                let start = range
+                    .next()
+                    .and_then(|x| x.parse::<usize>().ok())
+                    .unwrap_or(0);
+                let end = range
+                    .next()
+                    .and_then(|x| x.parse::<usize>().ok())
+                    .unwrap_or(start);
+                end.saturating_sub(start) + 1
+            })
+            .sum::<usize>();
+        if count > 0 {
+            return count;
         }
     }
     std::thread::available_parallelism().map_or(1, |value| value.get())
@@ -1708,10 +1776,10 @@ impl CoverageMap {
 
 fn build_coverage_map(project: &Path, manifest: &Path) -> Result<CoverageMap> {
     let coverage_cache = coverage_cache_path(project)?;
-    if coverage_cache.is_file() {
-        if let Ok(cache) = serde_json::from_slice::<CoverageCache>(&fs::read(&coverage_cache)?) {
-            return Ok(cache.into());
-        }
+    if coverage_cache.is_file()
+        && let Ok(cache) = serde_json::from_slice::<CoverageCache>(&fs::read(&coverage_cache)?)
+    {
+        return Ok(cache.into());
     }
     let routing_root = std::env::temp_dir()
         .join("rust-mutant-routing")
