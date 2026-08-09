@@ -39,13 +39,13 @@ Users can select a subset of families and subtypes without changing discovery or
 
 **Pass:** output contains only the requested families/subtypes; invalid names fail clearly; an empty selection does not silently run all operators.
 
-### 4. Small fixture: clean correctness
+### 4. Small fixture: outcome smoke test
 
-The small fixture is deliberately safe and does not need to exercise all 18 families.
+The small fixture follows GOAL-1's amended mixed-outcome contract. It remains deliberately small and need not exercise all 18 families, but it must expose every initial outcome bucket so the engine's classification surface stays cheap to verify.
 
-**Test:** baseline `cargo test` followed by the real release binary against `tests/fixtures/small`.
+**Test:** baseline `cargo test` followed by the real release binary against `tests/fixtures/small`; compare each bucket with the hand-checked M1 probes.
 
-**Pass:** 12–15 mutants, 100% killed, zero compile errors, and cold wall time no greater than 20 seconds on the reference two-core Linux box.
+**Pass:** 12–15 mutants, all five initial outcome buckets are present and correctly classified, counts sum to total, and cold wall time is no greater than 20 seconds on the reference two-core Linux box.
 
 ### 5. Medium fixture: complete inventory and all buckets
 
@@ -69,7 +69,7 @@ Compile errors remain visible and are not silently counted as kills. The fixture
 
 **Test:** sum `compile_error` across medium and large JSON outputs and compute the rate; print the per-family breakdown.
 
-**Pass:** small is 0%; medium plus large is no greater than 10% aggregate; every family has at least one compile-valid mutant; MSI excludes `compile_error`, `not_covered`, and `timeout` from its denominator.
+**Pass:** the small fixture's designed `compile_error` bucket is explicit and visible; medium plus large is no greater than 10% aggregate; every family has at least one compile-valid mutant; MSI excludes `compile_error`, `not_covered`, and `timeout` from its denominator.
 
 ### 8. Fixture harness integrity
 

@@ -50,13 +50,13 @@ The default report prints total mutants, per-outcome counts, MSI, and wall time.
 
 **Pass:** totals agree, counts sum to total, MSI is numerically correct, and a repeat run is identical apart from explicitly documented timing fields.
 
-### 6. Small correctness fixture
+### 6. Small outcome fixture
 
-The M1 fixture uses safe generic constructs and contains 12–15 mutants. It is designed for clean correctness, not full operator coverage.
+The M1 fixture uses safe generic constructs and contains 12–15 mutants deliberately spanning all five initial outcome buckets. It is an engine-classification smoke fixture, not a pure 100%-killed correctness fixture and does not require zero compile errors.
 
-**Test:** run the real release binary against `tests/fixtures/small` on the reference two-core Linux box after a baseline `cargo test`.
+**Test:** run the real release binary against `tests/fixtures/small` on the reference two-core Linux box after a baseline `cargo test`; hand-check one representative mutant from each outcome bucket.
 
-**Pass:** 12–15 mutants, 100% killed, zero compile errors, green baseline, and cold wall time no greater than 20 seconds.
+**Pass:** 12–15 mutants, `killed`, `survived`, `not_covered`, `compile_error`, and `timeout` are all present and correctly classified, counts sum to total, the baseline is green, and cold wall time is no greater than 20 seconds.
 
 ## Implementation Rules
 
@@ -77,7 +77,7 @@ The agent runs live in front of the human:
 
 1. `cargo build --release` and `rust-mutant --help`, showing real exit codes.
 2. The small fixture baseline, dry-run JSON, and full JSON run, including counts and the <=20s timing gate.
-3. A hand-applied mutant in a scratch copy, demonstrating that the observed test result maps to the reported classification.
+3. One hand-applied representative mutant from each of the five outcome buckets in a scratch copy, demonstrating that the observed test result maps to the reported classification.
 4. A real small Rust crate chosen by the human, with the original tree hash verified before and after.
 
 **Sign-off:** the human confirms the M1 criteria in-session; the document can then be marked signed-off.
