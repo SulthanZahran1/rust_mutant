@@ -302,6 +302,7 @@ dependencies = [
  "anyhow",
  "libc",
  "rayon",
+ "rust-mutant-tce",
  "serde",
  "serde_json",
  "tree-sitter",
@@ -328,7 +329,9 @@ dependencies = [
 name = "rust-mutant-tce"
 version = "0.1.0"
 dependencies = [
- "rust-mutant-core",
+ "anyhow",
+ "serde",
+ "walkdir",
 ]
 
 [[package]]

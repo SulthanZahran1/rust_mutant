@@ -6,6 +6,7 @@
 
 use anyhow::{Context, Result, anyhow, bail};
 use rayon::prelude::*;
+use rust_mutant_tce::TceResult;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs;
@@ -96,6 +97,7 @@ pub enum Status {
     NotCovered,
     CompileError,
     Timeout,
+    Equivalent,
 }
 
 impl Status {
@@ -106,6 +108,7 @@ impl Status {
             Self::NotCovered => "not_covered",
             Self::CompileError => "compile_error",
             Self::Timeout => "timeout",
+            Self::Equivalent => "equivalent",
         }
     }
 }
@@ -123,6 +126,8 @@ pub struct MutantResult {
     pub command: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub details: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tce: Option<TceResult>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -134,6 +139,7 @@ pub struct Summary {
     pub not_covered: usize,
     pub compile_error: usize,
     pub timeout: usize,
+    pub equivalent: usize,
     pub msi: f64,
     pub threshold: Option<f64>,
     pub threshold_passed: bool,
@@ -215,6 +221,7 @@ pub struct RunOptions {
     pub incremental: bool,
     pub base_ref: Option<String>,
     pub max_memory_mib: Option<u64>,
+    pub tce: bool,
 }
 
 impl Default for RunOptions {
@@ -233,6 +240,7 @@ impl Default for RunOptions {
             incremental: false,
             base_ref: None,
             max_memory_mib: None,
+            tce: true,
         }
     }
 }
@@ -1186,6 +1194,11 @@ pub fn run(options: &RunOptions) -> Result<Report> {
     let mut results = results?;
     results.sort_by(|a, b| a.mutant.id.cmp(&b.mutant.id));
     let execution_ms = execution_started.elapsed().as_millis();
+    let tce_ms = results
+        .iter()
+        .filter_map(|result| result.tce.as_ref())
+        .map(|tce| tce.duration_ms)
+        .sum();
     let summary = summarize(&results, options.threshold);
     let total_ms = started.elapsed().as_millis();
     let rss = current_rss_mib();
@@ -1209,7 +1222,7 @@ pub fn run(options: &RunOptions) -> Result<Report> {
             routing_ms,
             execution_ms,
             cache_ms: cache.cache_ms(),
-            tce_ms: 0,
+            tce_ms,
             total_ms,
         },
         resources: Resources {
@@ -1251,6 +1264,7 @@ fn report_for_discovery(
             cache: "miss".to_string(),
             command: None,
             details: None,
+            tce: None,
         })
         .collect::<Vec<_>>();
     Report {
@@ -1270,6 +1284,7 @@ fn report_for_discovery(
             not_covered: 0,
             compile_error: 0,
             timeout: 0,
+            equivalent: 0,
             msi: 0.0,
             threshold: options.threshold,
             threshold_passed: true,
@@ -1348,6 +1363,7 @@ fn execute_one(
             cache: "miss".into(),
             command: None,
             details: Some("source line is explicitly outside the fixture coverage probe".into()),
+            tce: None,
         };
         if !options.no_cache {
             cache.store(&key, &result)?;
@@ -1418,6 +1434,28 @@ fn execute_one(
             break;
         }
     }
+    let mut tce = None;
+    if final_status == Status::Survived && options.tce {
+        let tce_target = std::env::temp_dir().join("rust-mutant-tce").join(format!(
+            "{}-{}",
+            mutant.id,
+            std::process::id()
+        ));
+        let result = match rust_mutant_tce::compare(
+            project,
+            manifest,
+            &scratch,
+            &scratch_manifest,
+            &tce_target,
+        ) {
+            Ok(result) => result,
+            Err(error) => TceResult::error(error.to_string(), started.elapsed().as_millis()),
+        };
+        if result.equivalent {
+            final_status = Status::Equivalent;
+        }
+        tce = Some(result);
+    }
     let _ = fs::remove_dir_all(&scratch);
     let output = outputs.join("\n");
     let detail = match final_status {
@@ -1437,6 +1475,7 @@ fn execute_one(
         cache: "miss".into(),
         command: Some(command_text),
         details: detail,
+        tce,
     };
     if !options.no_cache {
         cache.store(&key, &result)?;
@@ -1497,6 +1536,7 @@ struct CachedOutcome {
     duration_ms: u128,
     command: Option<String>,
     details: Option<String>,
+    tce: Option<TceResult>,
 }
 
 impl CachedOutcome {
@@ -1507,6 +1547,7 @@ impl CachedOutcome {
             duration_ms: result.duration_ms,
             command: result.command.clone(),
             details: result.details.clone(),
+            tce: result.tce.clone(),
         }
     }
 
@@ -1519,6 +1560,7 @@ impl CachedOutcome {
             cache: cache.into(),
             command: self.command,
             details: self.details.map(|details| stable_diagnostic(&details)),
+            tce: self.tce,
         }
     }
 }
@@ -1553,12 +1595,13 @@ impl CacheStore {
             timeout.as_millis().to_string()
         };
         let mut value = format!(
-            "cacheSchema={CACHE_SCHEMA_VERSION};engine={};toolchain={};family={};id={};route={};timeout={timeout_key};",
+            "cacheSchema={CACHE_SCHEMA_VERSION};engine={};toolchain={};family={};id={};route={};tce={};timeout={timeout_key};",
             env!("CARGO_PKG_VERSION"),
             toolchain_identity(),
             mutant.family,
             mutant.id,
-            options.routing
+            options.routing,
+            options.tce
         );
         value.push_str(&hash_file(&project.join(&mutant.file))?);
         value.push_str(&hash_file(&project.join("Cargo.toml"))?);
@@ -2546,6 +2589,7 @@ fn summarize(results: &[MutantResult], threshold: Option<f64>) -> Summary {
     let not_covered = count("not_covered");
     let compile_error = count("compile_error");
     let timeout = count("timeout");
+    let equivalent = count("equivalent");
     let denominator = killed + survived;
     let msi = if denominator == 0 {
         100.0
@@ -2559,6 +2603,7 @@ fn summarize(results: &[MutantResult], threshold: Option<f64>) -> Summary {
         not_covered,
         compile_error,
         timeout,
+        equivalent,
         msi,
         threshold,
         threshold_passed: threshold.is_none_or(|value| msi >= value),
@@ -2632,6 +2677,7 @@ mod tests {
                 cache: "miss".into(),
                 command: None,
                 details: None,
+                tce: None,
             });
         }
         assert_eq!(summarize(&results, None).msi, 50.0);

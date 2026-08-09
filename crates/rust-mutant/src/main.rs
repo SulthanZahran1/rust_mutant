@@ -120,6 +120,7 @@ fn real_main() -> Result<u8> {
         incremental: cli.incremental,
         base_ref: cli.base_ref,
         max_memory_mib: cli.max_memory,
+        tce: !cli.no_tce,
     };
     let report = run(&options)?;
     let wants_json = cli.json || matches!(cli.format, Format::Json);
