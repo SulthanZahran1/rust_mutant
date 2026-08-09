@@ -41,7 +41,7 @@ Users can select a subset of families and subtypes without changing discovery or
 
 ### 4. Small fixture: outcome smoke test
 
-The small fixture follows GOAL-1's amended mixed-outcome contract. It remains deliberately small and need not exercise all 18 families, but it must expose every initial outcome bucket so the engine's classification surface stays cheap to verify.
+The small fixture follows GOAL-1's amended mixed-outcome contract. It remains deliberately small and need not exercise all 18 families; M1's separate operator-probes fixture already covers the ten generic families. The small fixture must expose every initial outcome bucket so the engine's classification surface stays cheap to verify.
 
 **Test:** baseline `cargo test` followed by the real release binary against `tests/fixtures/small`; compare each bucket with the hand-checked M1 probes.
 
@@ -65,7 +65,7 @@ The large fixture is a multi-file Rust project with 300 or more mutants and real
 
 ### 7. Compile-error budget
 
-Compile errors remain visible and are not silently counted as kills. The fixture contract has a zero-error small fixture and a bounded invalid-mutant rate for the complete inventory.
+Compile errors remain visible and are not silently counted as kills. The fixture contract has an explicit designed compile-error bucket in the small fixture and a bounded invalid-mutant rate for the complete inventory.
 
 **Test:** sum `compile_error` across medium and large JSON outputs and compute the rate; print the per-family breakdown.
 

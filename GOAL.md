@@ -28,7 +28,7 @@
 
 ## Pending draft amendments
 
-- **GOAL-1 fixture shape:** During milestone discussion, the human chose a mixed-outcome small fixture: 12–15 mutants with all five initial outcome buckets present. This supersedes the pure `100% killed / 0% compile_error` small-fixture wording in the next draft. The amendment must be recorded against issue #8 before GOAL-1 is locked.
+- **GOAL-1 fixture shape:** During milestone discussion, the human chose a mixed-outcome small fixture: 12–15 mutants with all five initial outcome buckets present. Generic-family discovery is verified separately through an M1 operator-probe fixture/suite. This supersedes the pure `100% killed / 0% compile_error` small-fixture wording in the next draft. The amendment must be recorded against issue #8 before GOAL-1 is locked.
 
 ## Lifecycle
 

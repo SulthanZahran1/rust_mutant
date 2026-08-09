@@ -22,9 +22,11 @@ A Cargo workspace contains a core library and a `rust-mutant` binary. The binary
 
 Discovery covers the locked 10 generic table-stakes families: AOR, AOD, AOI, ROR, LOR, LCR, COR, SDL, RVR, and loop increment/decrement. Each discovered point carries a stable mutant id, file identity, line, column, family, subtype, original text, and replacement text.
 
-**Test:** `rust-mutant --path tests/fixtures/small --dry-run --json` and a parser/operator unit-test suite.
+**Test:** `rust-mutant --path tests/fixtures/operator-probes --dry-run --json`, `rust-mutant --path tests/fixtures/small --dry-run --json`, and a parser/operator unit-test suite.
 
-**Pass:** every generic family exercised by the fixture produces at least one point; JSON fields are present; source spans are valid UTF-8 boundaries and point at the expected original text.
+**Pass:** every generic family produces at least one point in the dedicated operator-probes fixture; the mixed-outcome small fixture is not required to cover all ten families; JSON fields are present; source spans are valid UTF-8 boundaries and point at the expected original text.
+
+The operator-probes fixture is a discovery/application probe suite, not a second full mutation campaign. It keeps M1's ten-family coverage explicit without forcing the 12–15 mutant outcome fixture to carry every operator combination.
 
 ### 3. Source-only application
 
