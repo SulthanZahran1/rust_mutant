@@ -24,7 +24,7 @@ Discovery covers the locked 10 generic table-stakes families: AOR, AOD, AOI, ROR
 
 **Test:** `rust-mutant --path tests/fixtures/operator-probes --dry-run --json`, `rust-mutant --path tests/fixtures/small --dry-run --json`, and a parser/operator unit-test suite.
 
-**Pass:** every generic family produces at least one point in the dedicated operator-probes fixture; the mixed-outcome small fixture is not required to cover all ten families; JSON fields are present; source spans are valid UTF-8 boundaries and point at the expected original text.
+**Pass:** every generic family produces at least one point in the dedicated operator-probes fixture described in the [canonical fixture roles](GOAL.md#canonical-fixture-roles); the mixed-outcome small fixture is not required to cover all ten families; JSON fields are present; source spans are valid UTF-8 boundaries and point at the expected original text.
 
 The operator-probes fixture is a discovery/application probe suite, not a second full mutation campaign. It keeps M1's ten-family coverage explicit without forcing the 12–15 mutant outcome fixture to carry every operator combination.
 
@@ -54,7 +54,7 @@ The default report prints total mutants, per-outcome counts, MSI, and wall time.
 
 ### 6. Small outcome fixture
 
-The M1 fixture uses safe generic constructs and contains 12–15 mutants deliberately spanning all five initial outcome buckets. It is an engine-classification smoke fixture, not a pure 100%-killed correctness fixture and does not require zero compile errors.
+The [canonical small outcome fixture](GOAL.md#canonical-fixture-roles) uses safe generic constructs and contains 12–15 mutants deliberately spanning all five initial outcome buckets. It is an engine-classification smoke fixture, not a pure 100%-killed correctness fixture and does not require zero compile errors.
 
 **Test:** run the real release binary against `tests/fixtures/small` on the reference two-core Linux box after a baseline `cargo test`; hand-check one representative mutant from each outcome bucket.
 

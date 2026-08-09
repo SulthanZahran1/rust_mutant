@@ -31,6 +31,14 @@
 - **GOAL-1 fixture shape:** During milestone discussion, the human chose a mixed-outcome small fixture: 12–15 mutants with all five initial outcome buckets present. Generic-family discovery is verified separately through an M1 operator-probe fixture/suite. This supersedes the pure `100% killed / 0% compile_error` small-fixture wording in the next draft. The amendment must be recorded against issue #8 before GOAL-1 is locked.
 - **GOAL-4 TCE mode:** During milestone discussion, the human chose automatic post-survival LLVM-IR TCE by default, with `--no-tce` as the escape hatch. This supersedes the earlier opt-in wording in the provisional CLI/architecture notes and must be frozen with the final contract in M4.
 
+## Canonical fixture roles
+
+These roles are authoritative across the milestone documents:
+
+- **Small outcome fixture** — `tests/fixtures/small`; a 12–15 mutant M1/M2 classification smoke fixture with all five initial outcome buckets, a green baseline, and a cold run no greater than 20 seconds. It is not required to cover every operator family.
+- **Generic operator probes** — `tests/fixtures/operator-probes`; a focused M1 discovery/application suite that exercises every generic family. It is not a second full mutation campaign and does not replace the small outcome fixture.
+- **Medium integrated fixture** — `tests/fixtures/medium`; a 60–80 mutant M2 fixture covering all 18 public families and all five initial outcome buckets, with a cold run no greater than 90 seconds.
+
 ## Lifecycle
 
 Each milestone follows:
