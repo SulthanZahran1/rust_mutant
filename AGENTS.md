@@ -8,7 +8,7 @@ AST-based mutation testing for Rust — the third sibling of dart_mutant and gop
 
 ## Status
 
-- **Planning** — wayfinder map charted 2026-08-08 (this repo's issues). Research tickets in flight. No code yet.
+- **Planning** — wayfinder map charted 2026-08-08; GOAL milestone drafts are on the `docs/goal-milestones` branch. No code yet.
 
 ## Agent skills
 
