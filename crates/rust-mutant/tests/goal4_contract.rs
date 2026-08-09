@@ -125,6 +125,40 @@ fn repeated_json_runs_match_outside_timing() {
 }
 
 #[test]
+fn ror_ignores_generic_type_delimiters() {
+    let output = run(&[
+        "--path",
+        fixture("ror-generics-mre").to_str().unwrap(),
+        "--operators",
+        "ROR",
+        "--format",
+        "json",
+        "--no-tce",
+        "--no-routing",
+        "--no-cache",
+    ]);
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["summary"]["total"], 1);
+    assert_eq!(report["summary"]["killed"], 1);
+    assert_eq!(report["summary"]["compileError"], 0);
+    let mutants = report["mutants"].as_array().unwrap();
+    assert_eq!(mutants.len(), 1, "unexpected ROR mutants: {mutants:?}");
+    assert_eq!(mutants[0]["family"], "ROR");
+    assert_eq!(mutants[0]["original"], "<");
+    assert_eq!(mutants[0]["replacement"], ">");
+    assert_eq!(mutants[0]["file"], "src/lib.rs");
+    assert_eq!(mutants[0]["line"], 9);
+    assert_eq!(mutants[0]["column"], 10);
+}
+
+#[test]
 fn default_tce_has_six_equivalents_and_no_false_equivalents() {
     let output = run(&[
         "--path",
