@@ -12,11 +12,11 @@ Ship rust_mutant 1.0.0 as a stable, installable, machine-verifiable Rust mutatio
 
 ### 1. One-sided LLVM-IR TCE
 
-For surviving mutants, compile original and scratch-tree mutant through Cargo in debug mode with stable LLVM IR emission, `-C opt-level=2`, `-C debuginfo=0`, and `--remap-path-prefix`. Normalize only known path, codegen-unit, panic-location, allocation-name, and test type-hash noise. An empty or missing expected function definition is an error, never evidence of equivalence.
+For every surviving mutant, automatically compile the original and scratch-tree mutant through Cargo in debug mode with stable LLVM IR emission, `-C opt-level=2`, `-C debuginfo=0`, and `--remap-path-prefix`. `--no-tce` disables this post-survival analysis for a run. Normalize only known path, codegen-unit, panic-location, allocation-name, and test type-hash noise. An empty or missing expected function definition is an error, never evidence of equivalence.
 
-**Test:** run a 12-case soundness fixture containing six deliberately equivalent and six must-differ mutants, including a commutativity case and a multi-file case.
+**Test:** run a 12-case soundness fixture containing six deliberately equivalent and six must-differ mutants, including a commutativity case and a multi-file case, once with default settings and once with `--no-tce`.
 
-**Pass:** all six equivalent cases are detected; zero must-differ cases classify as `equivalent`; a killable mutant is never marked equivalent; the result records TCE cost and excludes `equivalent` from MSI. TCE runs through Cargo debug mode, never direct release rustc.
+**Pass:** default mode detects all six equivalent cases; zero must-differ cases classify as `equivalent`; `--no-tce` bypasses equivalence classification without changing ordinary mutant outcomes; a killable mutant is never marked equivalent; the result records TCE cost when enabled and excludes `equivalent` from MSI. TCE runs through Cargo debug mode, never direct release rustc.
 
 ### 2. Reports from one result model
 
@@ -76,7 +76,7 @@ README documents the differentiation, all 18 families, fixture gates, installati
 ## Implementation Rules
 
 - Contract freeze is a hard gate. After M4 locks, CLI flags, exit codes, JSON fields, and status meanings require explicit human renegotiation for breaking changes.
-- TCE is one-sided: identical normalized IR may be marked `equivalent`; different IR remains a live/survived result; never guess equivalence from a failed or empty build.
+- TCE is automatic after survivors unless `--no-tce` is supplied. It is one-sided: identical normalized IR may be marked `equivalent`; different IR remains a live/survived result; never guess equivalence from a failed or empty build.
 - Keep one result model for every report format.
 - Preserve M1–M3 fixture and routing regression tests on Linux and Windows.
 - Release artifacts are reproducible from a pinned Rust toolchain and carry checksums.
