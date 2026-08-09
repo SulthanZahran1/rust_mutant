@@ -27,10 +27,10 @@ jobs:
         run: cargo check --workspace
       - name: Clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
+      - name: Install nextest
+        uses: taiki-e/install-action@nextest
       - name: Unit and documentation tests
         # Contract tests mutate shared fixture scratch/report resources.
         run: cargo test --workspace -- --test-threads=1
-      - name: Install nextest
-        uses: taiki-e/install-action@nextest
       - name: Small fixture contract smoke test
         run: cargo run --release -- --path tests/fixtures/small --format json --quiet --threshold 0 --no-tce --no-cache
