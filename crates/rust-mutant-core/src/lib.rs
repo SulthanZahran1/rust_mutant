@@ -5,19 +5,27 @@
 //! compiler remains the authority for semantic validity.
 
 use anyhow::{Context, Result, anyhow, bail};
-use serde::Serialize;
-use std::collections::BTreeSet;
+use rayon::prelude::*;
+use serde::{Deserialize, Serialize};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs;
 #[cfg(unix)]
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
+use std::sync::OnceLock;
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
-use std::{io::Read, thread};
+use std::{
+    io::{Read, Write},
+    thread,
+};
 use tree_sitter::Parser;
 use walkdir::WalkDir;
 
 pub const SCHEMA_VERSION: u32 = 1;
+const CACHE_SCHEMA_VERSION: u32 = 2;
+static PEAK_RSS_MIB: AtomicU64 = AtomicU64::new(0);
 pub const GENERIC_FAMILIES: [&str; 10] = [
     "AOR",
     "AOD",
@@ -112,6 +120,8 @@ pub struct MutantResult {
     pub duration_ms: u128,
     pub cache: String,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub command: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub details: Option<String>,
 }
 
@@ -148,7 +158,19 @@ pub struct Resources {
     pub global_cpu_budget: usize,
     pub active_sessions: usize,
     pub memory_budget_mib: Option<u64>,
+    pub peak_rss_mib: u64,
+    pub wait_ms: u128,
     pub throttled: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RoutingInfo {
+    pub enabled: bool,
+    pub backend: String,
+    pub tests_discovered: usize,
+    pub mapped_mutants: usize,
+    pub full_suite_comparison: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -161,6 +183,8 @@ pub struct Report {
     pub mutants: Vec<MutantResult>,
     pub timing: Timing,
     pub resources: Resources,
+    pub routing: RoutingInfo,
+    pub cache_hits: usize,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -187,6 +211,10 @@ pub struct RunOptions {
     pub dry_run: bool,
     pub requested_workers: usize,
     pub no_cache: bool,
+    pub routing: bool,
+    pub incremental: bool,
+    pub base_ref: Option<String>,
+    pub max_memory_mib: Option<u64>,
 }
 
 impl Default for RunOptions {
@@ -201,6 +229,10 @@ impl Default for RunOptions {
             dry_run: false,
             requested_workers: 1,
             no_cache: false,
+            routing: true,
+            incremental: false,
+            base_ref: None,
+            max_memory_mib: None,
         }
     }
 }
@@ -1029,6 +1061,7 @@ fn stable_id(m: &Mutant) -> String {
 
 pub fn run(options: &RunOptions) -> Result<Report> {
     let started = Instant::now();
+    let session = GlobalSession::acquire()?;
     let project = options
         .project
         .canonicalize()
@@ -1040,6 +1073,11 @@ pub fn run(options: &RunOptions) -> Result<Report> {
         .manifest
         .clone()
         .unwrap_or_else(|| project.join("Cargo.toml"));
+    let manifest = if manifest.is_absolute() {
+        manifest
+    } else {
+        std::env::current_dir()?.join(manifest)
+    };
     if !manifest.is_file() {
         bail!("Cargo manifest does not exist: {}", manifest.display());
     }
@@ -1049,13 +1087,12 @@ pub fn run(options: &RunOptions) -> Result<Report> {
         mutants
             .retain(|m| &m.id == id || m.id.trim_start_matches('m').trim_start_matches('0') == id);
     }
-    let routing_ms = discovery_started.elapsed().as_millis();
     if options.dry_run {
         return Ok(report_for_discovery(
             &project,
             &manifest,
             mutants,
-            routing_ms,
+            discovery_started.elapsed().as_millis(),
             started.elapsed().as_millis(),
             options,
         ));
@@ -1073,6 +1110,7 @@ pub fn run(options: &RunOptions) -> Result<Report> {
         &manifest,
         &target_dir,
         options.timeout.max(Duration::from_secs(10)),
+        None,
     )?;
     if baseline.timed_out || baseline.code != Some(0) {
         bail!(
@@ -1081,16 +1119,80 @@ pub fn run(options: &RunOptions) -> Result<Report> {
             truncate(&baseline.stderr, 4000)
         );
     }
-    let execution_started = Instant::now();
-    let mut results = Vec::with_capacity(mutants.len());
-    for mutant in mutants {
-        let result = execute_one(&project, &manifest, &target_dir, mutant, options.timeout)?;
-        results.push(result);
+    let mut routing = CoverageMap::disabled();
+    if options.routing {
+        routing = build_coverage_map(&project, &manifest)?;
     }
+    let changed = if options.incremental {
+        Some(changed_source_files(
+            &project,
+            options.base_ref.as_deref().unwrap_or("HEAD~1"),
+        )?)
+    } else {
+        None
+    };
+    let routing_ms = discovery_started.elapsed().as_millis();
+    let adaptive = options.timeout == Duration::from_secs(2);
+    let mutant_timeout = if adaptive {
+        Duration::from_millis(
+            (baseline.duration_ms.saturating_mul(3) + 5000)
+                .max(5000)
+                .min(u64::MAX as u128) as u64,
+        )
+    } else {
+        options.timeout
+    };
+    let capacity = effective_cpu_capacity();
+    let global_cpu_budget = (capacity.saturating_mul(3) / 4).max(1);
+    let effective_workers = options.requested_workers.min(global_cpu_budget).max(1);
+    let memory_budget = memory_budget(options.max_memory_mib);
+    let rss_before = current_rss_mib();
+    PEAK_RSS_MIB.store(rss_before, Ordering::Relaxed);
+    let throttled_before = memory_budget.is_some_and(|budget| rss_before > budget);
+    let cache = CacheStore::new(&project);
+    let cache_hits = AtomicUsize::new(0);
+    let memory_wait_ms = AtomicU64::new(0);
+    let execution_started = Instant::now();
+    let pool = rayon::ThreadPoolBuilder::new()
+        .num_threads(effective_workers)
+        .thread_name(|index| format!("rust-mutant-worker-{index}"))
+        .build()?;
+    let results: Result<Vec<MutantResult>> = pool.install(|| {
+        mutants
+            .into_par_iter()
+            .map(|mutant| {
+                let waited = wait_for_memory(memory_budget);
+                memory_wait_ms.fetch_add(waited, Ordering::Relaxed);
+                let selected = if options.routing {
+                    routing.tests_for(&mutant.file, mutant.line)
+                } else {
+                    Vec::new()
+                };
+                execute_one(
+                    &project,
+                    &manifest,
+                    &target_dir,
+                    mutant,
+                    &selected,
+                    mutant_timeout,
+                    options,
+                    &cache,
+                    &cache_hits,
+                    changed.as_ref(),
+                )
+            })
+            .collect()
+    });
+    let mut results = results?;
     results.sort_by(|a, b| a.mutant.id.cmp(&b.mutant.id));
     let execution_ms = execution_started.elapsed().as_millis();
     let summary = summarize(&results, options.threshold);
     let total_ms = started.elapsed().as_millis();
+    let rss = current_rss_mib();
+    let peak_rss = PEAK_RSS_MIB.load(Ordering::Relaxed).max(rss);
+    let throttled = throttled_before || memory_budget.is_some_and(|budget| rss > budget);
+    let wait_ms = session.wait_ms + u128::from(memory_wait_ms.load(Ordering::Relaxed));
+    drop(session);
     Ok(Report {
         schema_version: SCHEMA_VERSION,
         tool: ToolInfo {
@@ -1106,18 +1208,28 @@ pub fn run(options: &RunOptions) -> Result<Report> {
         timing: Timing {
             routing_ms,
             execution_ms,
-            cache_ms: 0,
+            cache_ms: cache.cache_ms(),
             tce_ms: 0,
             total_ms,
         },
         resources: Resources {
             requested_workers: options.requested_workers,
-            effective_workers: 1,
-            global_cpu_budget: 1,
+            effective_workers,
+            global_cpu_budget,
             active_sessions: 1,
-            memory_budget_mib: None,
-            throttled: false,
+            memory_budget_mib: memory_budget,
+            peak_rss_mib: peak_rss,
+            wait_ms,
+            throttled,
         },
+        routing: RoutingInfo {
+            enabled: options.routing,
+            backend: routing.backend,
+            tests_discovered: routing.all.len(),
+            mapped_mutants: routing.mapped,
+            full_suite_comparison: !options.routing,
+        },
+        cache_hits: cache_hits.load(Ordering::Relaxed),
     })
 }
 
@@ -1137,6 +1249,7 @@ fn report_for_discovery(
             tests_run: Vec::new(),
             duration_ms: 0,
             cache: "miss".to_string(),
+            command: None,
             details: None,
         })
         .collect::<Vec<_>>();
@@ -1180,29 +1293,66 @@ fn report_for_discovery(
             global_cpu_budget: 1,
             active_sessions: 1,
             memory_budget_mib: None,
+            peak_rss_mib: 0,
+            wait_ms: 0,
             throttled: false,
         },
+        routing: RoutingInfo {
+            enabled: options.routing,
+            backend: "disabled".into(),
+            tests_discovered: 0,
+            mapped_mutants: 0,
+            full_suite_comparison: !options.routing,
+        },
+        cache_hits: 0,
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn execute_one(
     project: &Path,
     manifest: &Path,
     target_dir: &Path,
     mutant: Mutant,
+    selected: &[TestCase],
     timeout: Duration,
+    options: &RunOptions,
+    cache: &CacheStore,
+    cache_hits: &AtomicUsize,
+    changed: Option<&BTreeSet<String>>,
 ) -> Result<MutantResult> {
     let started = Instant::now();
+    let key = cache.key(project, &mutant, selected, options, timeout)?;
+    let cached = if options.no_cache {
+        None
+    } else {
+        cache.load(&key)?
+    };
+    if let Some(cached) = cached {
+        cache_hits.fetch_add(1, Ordering::Relaxed);
+        return Ok(cached.into_result(mutant, "hit"));
+    }
+    if changed.is_some_and(|files| !files.contains(&mutant.file)) {
+        bail!(
+            "incremental cache miss for unchanged source file {}",
+            mutant.file
+        );
+    }
     let line_directive = mutant.source_line.to_ascii_lowercase();
     if line_directive.contains("rust-mutant: not-covered") {
-        return Ok(MutantResult {
+        let result = MutantResult {
             mutant,
             status: Status::NotCovered.as_str().into(),
             tests_run: Vec::new(),
             duration_ms: started.elapsed().as_millis(),
             cache: "miss".into(),
+            command: None,
             details: Some("source line is explicitly outside the fixture coverage probe".into()),
-        });
+        };
+        if !options.no_cache {
+            cache.store(&key, &result)?;
+        }
+        return Ok(result);
     }
     let scratch = scratch_dir(&mutant.id);
     copy_project(project, &scratch)?;
@@ -1224,39 +1374,900 @@ fn execute_one(
     }
     source.replace_range(mutant.start_byte..mutant.end_byte, &mutant.replacement);
     fs::write(&target_file, source)?;
-    let command = cargo_test(
-        &scratch,
-        &scratch.join(manifest.file_name().unwrap_or_default()),
-        target_dir,
-        timeout,
-    )?;
-    let status = if command.timed_out {
-        Status::Timeout
-    } else if command.code == Some(0) {
-        Status::Survived
-    } else if looks_like_compile_error(&command.output()) {
-        Status::CompileError
+    let mutant_target_dir = target_dir.join(format!(
+        "worker-{}",
+        rayon::current_thread_index().unwrap_or(0)
+    ));
+    let scratch_manifest = scratch.join(manifest.file_name().unwrap_or_default());
+    let cases = if selected.is_empty() {
+        vec![None]
     } else {
-        Status::Killed
+        selected.iter().map(Some).collect::<Vec<_>>()
     };
-    let detail = match status {
-        Status::Killed => Some(truncate(&stable_diagnostic(&command.output()), 2000)),
-        Status::CompileError => Some(truncate(&stable_diagnostic(&command.output()), 3000)),
+    let mut tests_run = Vec::new();
+    let mut outputs = Vec::new();
+    let mut final_status = Status::Survived;
+    let mut command_text = String::new();
+    for case in cases {
+        let command = match case {
+            Some(test) => {
+                tests_run.push(test.label.clone());
+                cargo_nextest(
+                    &scratch,
+                    &scratch_manifest,
+                    &mutant_target_dir,
+                    timeout,
+                    Some(test),
+                )?
+            }
+            None => {
+                tests_run.push("full-suite".into());
+                cargo_nextest(
+                    &scratch,
+                    &scratch_manifest,
+                    &mutant_target_dir,
+                    timeout,
+                    None,
+                )?
+            }
+        };
+        command_text = command.command.clone();
+        outputs.push(command.output());
+        final_status = classify_command(&command);
+        if final_status != Status::Survived {
+            break;
+        }
+    }
+    let _ = fs::remove_dir_all(&scratch);
+    let output = outputs.join("\n");
+    let detail = match final_status {
+        Status::Killed => Some(truncate(&stable_diagnostic(&output), 2000)),
+        Status::CompileError => Some(truncate(&stable_diagnostic(&output), 3000)),
         Status::Timeout => Some(format!(
-            "cargo test exceeded fixed M1 timeout of {} ms",
+            "nextest exceeded adaptive timeout of {} ms",
             timeout.as_millis()
         )),
         _ => None,
     };
-    let _ = fs::remove_dir_all(&scratch);
-    Ok(MutantResult {
+    let result = MutantResult {
         mutant,
-        status: status.as_str().into(),
-        tests_run: vec!["cargo test --test-threads=1".into()],
+        status: final_status.as_str().into(),
+        tests_run,
         duration_ms: started.elapsed().as_millis(),
         cache: "miss".into(),
+        command: Some(command_text),
         details: detail,
+    };
+    if !options.no_cache {
+        cache.store(&key, &result)?;
+    }
+    Ok(result)
+}
+
+#[derive(Debug)]
+struct GlobalSession {
+    path: PathBuf,
+    wait_ms: u128,
+}
+
+impl GlobalSession {
+    fn acquire() -> Result<Self> {
+        let path = std::env::temp_dir().join("rust-mutant-global-session.lock");
+        let started = Instant::now();
+        loop {
+            match fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&path)
+            {
+                Ok(mut file) => {
+                    writeln!(file, "{}", std::process::id())?;
+                    return Ok(Self {
+                        path,
+                        wait_ms: started.elapsed().as_millis(),
+                    });
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                    let stale = fs::read_to_string(&path)
+                        .ok()
+                        .and_then(|value| value.trim().parse::<u32>().ok())
+                        .is_some_and(|pid| !Path::new(&format!("/proc/{pid}")).exists());
+                    if stale {
+                        let _ = fs::remove_file(&path);
+                        continue;
+                    }
+                    thread::sleep(Duration::from_millis(25));
+                }
+                Err(error) => return Err(error.into()),
+            }
+        }
+    }
+}
+
+impl Drop for GlobalSession {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.path);
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct CachedOutcome {
+    status: String,
+    tests_run: Vec<String>,
+    duration_ms: u128,
+    command: Option<String>,
+    details: Option<String>,
+}
+
+impl CachedOutcome {
+    fn from_result(result: &MutantResult) -> Self {
+        Self {
+            status: result.status.clone(),
+            tests_run: result.tests_run.clone(),
+            duration_ms: result.duration_ms,
+            command: result.command.clone(),
+            details: result.details.clone(),
+        }
+    }
+
+    fn into_result(self, mutant: Mutant, cache: &str) -> MutantResult {
+        MutantResult {
+            mutant,
+            status: self.status,
+            tests_run: self.tests_run,
+            duration_ms: 0,
+            cache: cache.into(),
+            command: self.command,
+            details: self.details.map(|details| stable_diagnostic(&details)),
+        }
+    }
+}
+
+#[derive(Debug)]
+struct CacheStore {
+    dir: PathBuf,
+    cache_ms: AtomicU64,
+}
+
+impl CacheStore {
+    fn new(project: &Path) -> Self {
+        Self {
+            dir: std::env::temp_dir()
+                .join("rust-mutant-cache")
+                .join(format!("{:016x}", stable_path_hash(project))),
+            cache_ms: AtomicU64::new(0),
+        }
+    }
+
+    fn key(
+        &self,
+        project: &Path,
+        mutant: &Mutant,
+        tests: &[TestCase],
+        options: &RunOptions,
+        timeout: Duration,
+    ) -> Result<String> {
+        let timeout_key = if options.timeout == Duration::from_secs(2) {
+            "adaptive".into()
+        } else {
+            timeout.as_millis().to_string()
+        };
+        let mut value = format!(
+            "cacheSchema={CACHE_SCHEMA_VERSION};engine={};toolchain={};family={};id={};route={};timeout={timeout_key};",
+            env!("CARGO_PKG_VERSION"),
+            toolchain_identity(),
+            mutant.family,
+            mutant.id,
+            options.routing
+        );
+        value.push_str(&hash_file(&project.join(&mutant.file))?);
+        value.push_str(&hash_file(&project.join("Cargo.toml"))?);
+        let lockfile = project.join("Cargo.lock");
+        if lockfile.is_file() {
+            value.push_str(&hash_file(&lockfile)?);
+        }
+        for entry in WalkDir::new(project.join("tests"))
+            .follow_links(false)
+            .into_iter()
+            .filter_map(Result::ok)
+        {
+            if entry.file_type().is_file() {
+                value.push_str(&hash_file(entry.path())?);
+            }
+        }
+        for test in tests {
+            value.push_str(&test.label);
+        }
+        Ok(format!("{:016x}", string_hash(&value)))
+    }
+
+    fn load(&self, key: &str) -> Result<Option<CachedOutcome>> {
+        let started = Instant::now();
+        let path = self.dir.join(format!("{key}.json"));
+        let result = if !path.is_file() {
+            None
+        } else {
+            Some(serde_json::from_slice(&fs::read(path)?)?)
+        };
+        self.cache_ms
+            .fetch_add(started.elapsed().as_millis() as u64, Ordering::Relaxed);
+        Ok(result)
+    }
+
+    fn store(&self, key: &str, result: &MutantResult) -> Result<()> {
+        let started = Instant::now();
+        fs::create_dir_all(&self.dir)?;
+        let path = self.dir.join(format!("{key}.json"));
+        let temp = self.dir.join(format!(".{key}.tmp-{}", std::process::id()));
+        fs::write(
+            &temp,
+            serde_json::to_vec(&CachedOutcome::from_result(result))?,
+        )?;
+        fs::rename(temp, path)?;
+        self.cache_ms
+            .fetch_add(started.elapsed().as_millis() as u64, Ordering::Relaxed);
+        Ok(())
+    }
+
+    fn cache_ms(&self) -> u128 {
+        u128::from(self.cache_ms.load(Ordering::Relaxed))
+    }
+}
+
+fn hash_file(path: &Path) -> Result<String> {
+    Ok(format!(
+        "{:016x}",
+        string_hash(&String::from_utf8_lossy(&fs::read(path)?))
+    ))
+}
+
+fn string_hash(value: &str) -> u64 {
+    let mut hash = 0xcbf29ce484222325u64;
+    for byte in value.bytes() {
+        hash ^= u64::from(byte);
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    hash
+}
+
+fn toolchain_identity() -> &'static str {
+    static IDENTITY: OnceLock<String> = OnceLock::new();
+    IDENTITY.get_or_init(|| {
+        let rustc = Command::new("rustc")
+            .arg("-vV")
+            .output()
+            .ok()
+            .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_string())
+            .unwrap_or_else(|| "rustc-unavailable".into());
+        let nextest = Command::new("cargo")
+            .args(["nextest", "--version"])
+            .output()
+            .ok()
+            .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_string())
+            .unwrap_or_else(|| "cargo-nextest-unavailable".into());
+        format!("{rustc}|{nextest}")
     })
+}
+
+fn changed_source_files(project: &Path, base_ref: &str) -> Result<BTreeSet<String>> {
+    let output = Command::new("git")
+        .current_dir(project)
+        .arg("diff")
+        .arg("--name-only")
+        .arg(base_ref)
+        .arg("--")
+        .arg("src")
+        .output()?;
+    if !output.status.success() {
+        bail!("cannot resolve incremental base ref `{base_ref}`");
+    }
+    Ok(String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .map(|line| {
+            let line = line.trim().replace('\\', "/");
+            line.find("src/")
+                .map_or(line.clone(), |index| line[index..].into())
+        })
+        .filter(|line| !line.is_empty())
+        .collect())
+}
+
+fn effective_cpu_capacity() -> usize {
+    let affinity = fs::read_to_string("/proc/self/status")
+        .ok()
+        .and_then(|status| {
+            status
+                .lines()
+                .find_map(|line| line.strip_prefix("Cpus_allowed_list:\t"))
+                .map(|value| {
+                    value
+                        .split(',')
+                        .map(|part| {
+                            let mut range = part.split('-');
+                            let start = range
+                                .next()
+                                .and_then(|x| x.parse::<usize>().ok())
+                                .unwrap_or(0);
+                            let end = range
+                                .next()
+                                .and_then(|x| x.parse::<usize>().ok())
+                                .unwrap_or(start);
+                            end.saturating_sub(start) + 1
+                        })
+                        .sum::<usize>()
+                })
+                .filter(|count| *count > 0)
+        });
+    let quota = fs::read_to_string("/sys/fs/cgroup/cpu.max")
+        .ok()
+        .and_then(|value| {
+            let mut fields = value.split_whitespace();
+            let quota = fields.next()?;
+            let period = fields.next()?.parse::<u64>().ok()?;
+            if quota == "max" || period == 0 {
+                return None;
+            }
+            let quota = quota.parse::<u64>().ok()?;
+            Some((quota / period).max(1) as usize)
+        });
+    affinity
+        .into_iter()
+        .chain(quota)
+        .min()
+        .or_else(|| {
+            std::thread::available_parallelism()
+                .ok()
+                .map(|value| value.get())
+        })
+        .unwrap_or(1)
+}
+
+fn memory_budget(requested: Option<u64>) -> Option<u64> {
+    let total = fs::read_to_string("/proc/meminfo")
+        .ok()?
+        .lines()
+        .find_map(|line| {
+            line.strip_prefix("MemTotal:")
+                .and_then(|value| value.split_whitespace().next())
+                .and_then(|value| value.parse::<u64>().ok())
+        })
+        .map(|kib| kib / 1024)?;
+    let ceiling = total.saturating_mul(75) / 100;
+    Some(requested.map_or(ceiling, |value| value.min(ceiling)))
+}
+
+fn wait_for_memory(budget: Option<u64>) -> u64 {
+    let Some(limit) = budget else {
+        record_peak_rss();
+        return 0;
+    };
+    if current_rss_mib() <= limit {
+        record_peak_rss();
+        return 0;
+    }
+    let started = Instant::now();
+    while current_rss_mib() > limit && started.elapsed() < Duration::from_millis(250) {
+        record_peak_rss();
+        thread::sleep(Duration::from_millis(25));
+    }
+    record_peak_rss();
+    started.elapsed().as_millis() as u64
+}
+
+fn record_peak_rss() {
+    let rss = current_rss_mib();
+    PEAK_RSS_MIB.fetch_max(rss, Ordering::Relaxed);
+}
+
+fn current_rss_mib() -> u64 {
+    let root = std::process::id();
+    let mut processes = HashMap::new();
+    let Ok(entries) = fs::read_dir("/proc") else {
+        return 0;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else {
+            continue;
+        };
+        let Ok(pid) = name.parse::<u32>() else {
+            continue;
+        };
+        let Ok(status) = fs::read_to_string(entry.path().join("status")) else {
+            continue;
+        };
+        let mut parent = None;
+        let mut rss_kib = None;
+        for line in status.lines() {
+            if let Some(value) = line.strip_prefix("PPid:") {
+                parent = value.trim().parse::<u32>().ok();
+            } else if let Some(value) = line.strip_prefix("VmRSS:") {
+                rss_kib = value.split_whitespace().next().and_then(|v| v.parse().ok());
+            }
+        }
+        if let (Some(parent), Some(rss_kib)) = (parent, rss_kib) {
+            processes.insert(pid, (parent, rss_kib));
+        }
+    }
+    let mut total_kib = 0u64;
+    for (&pid, &(_, rss_kib)) in &processes {
+        let mut current = pid;
+        let mut visited = BTreeSet::new();
+        loop {
+            if current == root {
+                total_kib = total_kib.saturating_add(rss_kib);
+                break;
+            }
+            if !visited.insert(current) {
+                break;
+            }
+            let Some(&(parent, _)) = processes.get(&current) else {
+                break;
+            };
+            if parent == 0 || parent == current {
+                break;
+            }
+            current = parent;
+        }
+    }
+    (total_kib / 1024).max(1)
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct TestCase {
+    binary: String,
+    name: String,
+    label: String,
+}
+
+#[derive(Debug, Clone)]
+struct CoverageMap {
+    by_line: BTreeMap<(String, usize), Vec<TestCase>>,
+    all: Vec<TestCase>,
+    backend: String,
+    mapped: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct CoverageCache {
+    entries: Vec<CoverageEntry>,
+    all: Vec<TestCase>,
+    backend: String,
+    mapped: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct CoverageEntry {
+    file: String,
+    line: usize,
+    tests: Vec<TestCase>,
+}
+
+impl From<CoverageCache> for CoverageMap {
+    fn from(cache: CoverageCache) -> Self {
+        let by_line = cache
+            .entries
+            .into_iter()
+            .map(|entry| ((entry.file, entry.line), entry.tests))
+            .collect();
+        Self {
+            by_line,
+            all: cache.all,
+            backend: cache.backend,
+            mapped: cache.mapped,
+        }
+    }
+}
+
+impl CoverageMap {
+    fn disabled() -> Self {
+        Self {
+            by_line: BTreeMap::new(),
+            all: Vec::new(),
+            backend: "disabled".into(),
+            mapped: 0,
+        }
+    }
+
+    fn tests_for(&self, file: &str, line: usize) -> Vec<TestCase> {
+        self.by_line
+            .get(&(file.to_string(), line))
+            .cloned()
+            .unwrap_or_else(|| self.all.clone())
+    }
+}
+
+fn build_coverage_map(project: &Path, manifest: &Path) -> Result<CoverageMap> {
+    let coverage_cache = coverage_cache_path(project)?;
+    if coverage_cache.is_file()
+        && let Ok(cache) = serde_json::from_slice::<CoverageCache>(&fs::read(&coverage_cache)?)
+    {
+        return Ok(cache.into());
+    }
+    let routing_root = std::env::temp_dir()
+        .join("rust-mutant-routing")
+        .join(format!("{:016x}", stable_path_hash(project)));
+    if routing_root.exists() {
+        fs::remove_dir_all(&routing_root)?;
+    }
+    fs::create_dir_all(&routing_root)?;
+    let target_dir = routing_root.join("target");
+    let listed = nextest_list(project, manifest, &target_dir).unwrap_or_default();
+    let all = if listed.is_empty() {
+        static_test_cases(project)
+    } else {
+        listed
+    };
+    if all.is_empty() {
+        return Ok(CoverageMap {
+            by_line: BTreeMap::new(),
+            all,
+            backend: "static-fallback".into(),
+            mapped: 0,
+        });
+    }
+    let profile_root = routing_root.join("profiles");
+    fs::create_dir_all(&profile_root)?;
+    let mut by_line: BTreeMap<(String, usize), Vec<TestCase>> = BTreeMap::new();
+    let mut llvm_successes = 0usize;
+    for (index, test) in all.iter().enumerate() {
+        let test_dir = profile_root.join(index.to_string());
+        fs::create_dir_all(&test_dir)?;
+        let profile_pattern = test_dir.join("%p-%m.profraw");
+        let mut command = Command::new("cargo");
+        command
+            .current_dir(project)
+            .arg("nextest")
+            .arg("run")
+            .arg("--manifest-path")
+            .arg(manifest)
+            .arg("--target-dir")
+            .arg(&target_dir)
+            .arg("--test")
+            .arg(&test.binary)
+            .arg(&test.name)
+            .arg("--no-fail-fast")
+            .arg("--status-level")
+            .arg("fail")
+            .arg("--final-status-level")
+            .arg("none")
+            .env("RUSTFLAGS", "-C instrument-coverage")
+            .env("LLVM_PROFILE_FILE", profile_pattern)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        if command.status().is_err() {
+            continue;
+        }
+        let profiles = fs::read_dir(&test_dir)?
+            .filter_map(Result::ok)
+            .map(|entry| entry.path())
+            .filter(|path| path.extension().is_some_and(|x| x == "profraw"))
+            .collect::<Vec<_>>();
+        if profiles.is_empty() {
+            continue;
+        }
+        let profdata = test_dir.join("merged.profdata");
+        let mut merge = Command::new(llvm_tool("llvm-profdata"));
+        merge.arg("merge").arg("-sparse").arg("-o").arg(&profdata);
+        for profile in profiles {
+            merge.arg(profile);
+        }
+        if !merge.status().is_ok_and(|status| status.success()) {
+            continue;
+        }
+        let Some(binary) = nextest_binary_path(project, manifest, &target_dir, &test.binary) else {
+            continue;
+        };
+        let export = Command::new(llvm_tool("llvm-cov"))
+            .arg("export")
+            .arg("--format=text")
+            .arg(format!("--instr-profile={}", profdata.display()))
+            .arg(binary)
+            .output();
+        let Ok(export) = export else { continue };
+        if !export.status.success() {
+            continue;
+        }
+        let Ok(value) = serde_json::from_slice::<serde_json::Value>(&export.stdout) else {
+            continue;
+        };
+        let Some(files) = value["data"][0]["files"].as_array() else {
+            continue;
+        };
+        llvm_successes += 1;
+        for file in files {
+            let Some(name) = file["filename"].as_str() else {
+                continue;
+            };
+            let relative = coverage_relative_path(project, name);
+            let Some(segments) = file["segments"].as_array() else {
+                continue;
+            };
+            for segment in segments {
+                let Some(line) = segment[0].as_u64() else {
+                    continue;
+                };
+                let count = segment[2].as_u64().unwrap_or(0);
+                if count == 0 {
+                    continue;
+                }
+                let key = (relative.clone(), line as usize);
+                let entries = by_line.entry(key).or_default();
+                if !entries.iter().any(|entry| entry.label == test.label) {
+                    entries.push(test.clone());
+                }
+            }
+        }
+    }
+    if llvm_successes == 0 || by_line.is_empty() {
+        let fallback = static_coverage_map(project, all);
+        save_coverage_map(&coverage_cache, &fallback)?;
+        let _ = fs::remove_dir_all(&routing_root);
+        return Ok(fallback);
+    }
+    let _ = fs::remove_dir_all(&routing_root);
+    let map = CoverageMap {
+        mapped: by_line.len(),
+        by_line,
+        all,
+        backend: "llvm-cov".into(),
+    };
+    save_coverage_map(&coverage_cache, &map)?;
+    Ok(map)
+}
+
+fn coverage_cache_path(project: &Path) -> Result<PathBuf> {
+    let root = std::env::temp_dir().join("rust-mutant-coverage-cache");
+    fs::create_dir_all(&root)?;
+    Ok(root.join(format!("{:016x}.json", project_content_hash(project)?)))
+}
+
+fn project_content_hash(project: &Path) -> Result<u64> {
+    let mut value = String::new();
+    for relative_root in ["src", "tests"] {
+        for entry in WalkDir::new(project.join(relative_root))
+            .follow_links(false)
+            .into_iter()
+            .filter_map(Result::ok)
+        {
+            if entry.file_type().is_file() {
+                value.push_str(&slash_path(entry.path()));
+                value.push_str(&hash_file(entry.path())?);
+            }
+        }
+    }
+    value.push_str(&hash_file(&project.join("Cargo.toml"))?);
+    Ok(string_hash(&value))
+}
+
+fn save_coverage_map(path: &Path, map: &CoverageMap) -> Result<()> {
+    let cache = CoverageCache {
+        entries: map
+            .by_line
+            .iter()
+            .map(|((file, line), tests)| CoverageEntry {
+                file: file.clone(),
+                line: *line,
+                tests: tests.clone(),
+            })
+            .collect(),
+        all: map.all.clone(),
+        backend: map.backend.clone(),
+        mapped: map.mapped,
+    };
+    let temp = path.with_extension(format!("tmp-{}", std::process::id()));
+    fs::write(&temp, serde_json::to_vec(&cache)?)?;
+    fs::rename(temp, path)?;
+    Ok(())
+}
+
+fn nextest_list(project: &Path, manifest: &Path, target_dir: &Path) -> Result<Vec<TestCase>> {
+    let output = Command::new("cargo")
+        .current_dir(project)
+        .arg("nextest")
+        .arg("list")
+        .arg("--manifest-path")
+        .arg(manifest)
+        .arg("--target-dir")
+        .arg(target_dir)
+        .arg("--message-format")
+        .arg("json")
+        .output()?;
+    if !output.status.success() {
+        bail!("nextest list failed");
+    }
+    let text = String::from_utf8_lossy(&output.stdout);
+    let start = text
+        .find('{')
+        .ok_or_else(|| anyhow!("nextest list returned no JSON"))?;
+    let value: serde_json::Value = serde_json::from_str(&text[start..])?;
+    let mut cases = Vec::new();
+    if let Some(suites) = value["rust-suites"].as_object() {
+        for suite in suites.values() {
+            if suite["kind"] != "test" {
+                continue;
+            }
+            let Some(binary) = suite["binary-name"].as_str() else {
+                continue;
+            };
+            let Some(testcases) = suite["testcases"].as_object() else {
+                continue;
+            };
+            for name in testcases.keys() {
+                cases.push(TestCase {
+                    binary: binary.into(),
+                    name: name.clone(),
+                    label: format!("{binary}::{name}"),
+                });
+            }
+        }
+    }
+    cases.sort_by(|a, b| a.label.cmp(&b.label));
+    Ok(cases)
+}
+
+fn nextest_binary_path(
+    _project: &Path,
+    _manifest: &Path,
+    target_dir: &Path,
+    binary: &str,
+) -> Option<PathBuf> {
+    let deps = target_dir.join("debug").join("deps");
+    let prefix = format!("{binary}-");
+    WalkDir::new(deps)
+        .follow_links(false)
+        .into_iter()
+        .filter_map(Result::ok)
+        .filter(|entry| {
+            entry.file_type().is_file()
+                && entry.file_name().to_string_lossy().starts_with(&prefix)
+                && entry
+                    .path()
+                    .metadata()
+                    .map(|meta| {
+                        #[cfg(unix)]
+                        {
+                            use std::os::unix::fs::PermissionsExt;
+                            meta.permissions().mode() & 0o111 != 0
+                        }
+                        #[cfg(not(unix))]
+                        {
+                            true
+                        }
+                    })
+                    .unwrap_or(false)
+        })
+        .max_by_key(|entry| {
+            fs::metadata(entry.path())
+                .ok()
+                .and_then(|meta| meta.modified().ok())
+        })
+        .map(|entry| entry.into_path())
+}
+
+fn static_test_cases(project: &Path) -> Vec<TestCase> {
+    let mut cases = Vec::new();
+    let tests = project.join("tests");
+    if !tests.is_dir() {
+        return cases;
+    }
+    for entry in WalkDir::new(tests)
+        .follow_links(false)
+        .into_iter()
+        .filter_map(Result::ok)
+    {
+        if !entry.file_type().is_file() || entry.path().extension().is_none_or(|x| x != "rs") {
+            continue;
+        }
+        let Ok(source) = fs::read_to_string(entry.path()) else {
+            continue;
+        };
+        let binary = entry
+            .path()
+            .file_stem()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .to_string();
+        for line in source.lines() {
+            let trimmed = line.trim();
+            if let Some(name) = trimmed
+                .strip_prefix("fn ")
+                .and_then(|value| value.split('(').next())
+            {
+                cases.push(TestCase {
+                    binary: binary.clone(),
+                    name: name.into(),
+                    label: format!("{binary}::{name}"),
+                });
+            }
+        }
+    }
+    cases.sort_by(|a, b| a.label.cmp(&b.label));
+    cases
+}
+
+fn static_coverage_map(project: &Path, all: Vec<TestCase>) -> CoverageMap {
+    let mut by_line = BTreeMap::new();
+    for entry in WalkDir::new(project.join("src"))
+        .follow_links(false)
+        .into_iter()
+        .filter_map(Result::ok)
+    {
+        if !entry.file_type().is_file() || entry.path().extension().is_none_or(|x| x != "rs") {
+            continue;
+        }
+        let Ok(source) = fs::read_to_string(entry.path()) else {
+            continue;
+        };
+        let relative = slash_path(entry.path().strip_prefix(project).unwrap_or(entry.path()));
+        let module = entry
+            .path()
+            .file_stem()
+            .unwrap_or_default()
+            .to_string_lossy();
+        let matching = all
+            .iter()
+            .filter(|test| {
+                let test_file = project.join("tests").join(format!("{}.rs", test.binary));
+                fs::read_to_string(test_file)
+                    .map(|text| text.contains(&format!("{module}::")))
+                    .unwrap_or(false)
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        if matching.is_empty() {
+            continue;
+        }
+        for (line, _) in source.lines().enumerate() {
+            by_line.insert((relative.clone(), line + 1), matching.clone());
+        }
+    }
+    CoverageMap {
+        mapped: by_line.len(),
+        by_line,
+        all,
+        backend: "static-fallback".into(),
+    }
+}
+
+fn coverage_relative_path(project: &Path, name: &str) -> String {
+    let path = Path::new(name);
+    if let Ok(relative) = path.strip_prefix(project) {
+        return slash_path(relative);
+    }
+    let normalized = name.replace('\\', "/");
+    normalized
+        .find("src/")
+        .map_or(normalized.clone(), |index| normalized[index..].into())
+}
+
+fn llvm_tool(name: &str) -> PathBuf {
+    if let Ok(sysroot) = Command::new("rustc").arg("--print").arg("sysroot").output() {
+        let sysroot = String::from_utf8_lossy(&sysroot.stdout).trim().to_string();
+        let host = rust_host();
+        let candidate = PathBuf::from(sysroot)
+            .join("lib/rustlib")
+            .join(host)
+            .join("bin")
+            .join(name);
+        if candidate.is_file() {
+            return candidate;
+        }
+    }
+    PathBuf::from(name)
+}
+
+fn rust_host() -> String {
+    Command::new("rustc")
+        .arg("-vV")
+        .output()
+        .ok()
+        .and_then(|output| {
+            String::from_utf8_lossy(&output.stdout)
+                .lines()
+                .find_map(|line| line.strip_prefix("host: ").map(str::to_string))
+        })
+        .unwrap_or_else(|| "x86_64-unknown-linux-gnu".into())
 }
 
 #[derive(Debug)]
@@ -1265,6 +2276,8 @@ struct CommandResult {
     timed_out: bool,
     stdout: String,
     stderr: String,
+    duration_ms: u128,
+    command: String,
 }
 impl CommandResult {
     fn output(&self) -> String {
@@ -1277,6 +2290,7 @@ fn cargo_test(
     manifest: &Path,
     target_dir: &Path,
     timeout: Duration,
+    filter: Option<&str>,
 ) -> Result<CommandResult> {
     let mut command = Command::new("cargo");
     #[cfg(unix)]
@@ -1290,19 +2304,74 @@ fn cargo_test(
         .arg(target_dir)
         .arg("--quiet")
         .arg("--")
-        .arg("--test-threads=1")
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
+        .arg("--test-threads=1");
+    if let Some(filter) = filter {
+        command.arg(filter);
+    }
+    let command_text = format!("cargo test --manifest-path {}", manifest.display());
+    command.stdout(Stdio::piped()).stderr(Stdio::piped());
     let mut child = command
         .spawn()
         .with_context(|| format!("spawn cargo test in {}", cwd.display()))?;
-    wait_child(&mut child, timeout)
+    let mut result = wait_child(&mut child, timeout)?;
+    result.command = command_text;
+    Ok(result)
+}
+
+fn cargo_nextest(
+    cwd: &Path,
+    manifest: &Path,
+    target_dir: &Path,
+    timeout: Duration,
+    test: Option<&TestCase>,
+) -> Result<CommandResult> {
+    let mut command = Command::new("cargo");
+    #[cfg(unix)]
+    command.process_group(0);
+    command
+        .current_dir(cwd)
+        .arg("nextest")
+        .arg("run")
+        .arg("--manifest-path")
+        .arg(manifest)
+        .arg("--target-dir")
+        .arg(target_dir)
+        .arg("--no-fail-fast")
+        .arg("--status-level")
+        .arg("fail")
+        .arg("--final-status-level")
+        .arg("none");
+    let mut command_text = String::from("cargo nextest run");
+    if let Some(test) = test {
+        command.arg("--test").arg(&test.binary).arg(&test.name);
+        command_text.push_str(&format!(" --test {} {}", test.binary, test.name));
+    }
+    command.stdout(Stdio::piped()).stderr(Stdio::piped());
+    let mut child = command
+        .spawn()
+        .with_context(|| format!("spawn cargo nextest in {}", cwd.display()))?;
+    let mut result = wait_child(&mut child, timeout)?;
+    result.command = command_text;
+    Ok(result)
+}
+
+fn classify_command(command: &CommandResult) -> Status {
+    if command.timed_out {
+        Status::Timeout
+    } else if command.code == Some(0) {
+        Status::Survived
+    } else if looks_like_compile_error(&command.output()) {
+        Status::CompileError
+    } else {
+        Status::Killed
+    }
 }
 
 fn wait_child(child: &mut Child, timeout: Duration) -> Result<CommandResult> {
     let start = Instant::now();
     let mut timed_out = false;
     loop {
+        record_peak_rss();
         if let Some(status) = child.try_wait()? {
             let mut stdout = String::new();
             let mut stderr = String::new();
@@ -1317,6 +2386,8 @@ fn wait_child(child: &mut Child, timeout: Duration) -> Result<CommandResult> {
                 timed_out,
                 stdout,
                 stderr,
+                duration_ms: start.elapsed().as_millis(),
+                command: String::new(),
             });
         }
         if start.elapsed() >= timeout {
@@ -1343,6 +2414,8 @@ fn wait_child(child: &mut Child, timeout: Duration) -> Result<CommandResult> {
                 timed_out,
                 stdout,
                 stderr,
+                duration_ms: start.elapsed().as_millis(),
+                command: String::new(),
             });
         }
         thread::sleep(Duration::from_millis(20));
@@ -1396,6 +2469,14 @@ fn stable_path_hash(path: &Path) -> u64 {
 
 fn stable_diagnostic(value: &str) -> String {
     let mut result = value.to_string();
+    let scratch_prefix = "/tmp/rust-mutant-scratch-";
+    while let Some(start) = result.find(scratch_prefix) {
+        let suffix_start = start + scratch_prefix.len();
+        let end = result[suffix_start..]
+            .find('/')
+            .map_or(result.len(), |offset| suffix_start + offset);
+        result.replace_range(start..end, "/tmp/rust-mutant-scratch");
+    }
     let mut search_from = 0usize;
     while let Some(relative) = result[search_from..].find("thread '") {
         let start = search_from + relative;
@@ -1425,8 +2506,15 @@ fn stable_diagnostic(value: &str) -> String {
             let duration_start = start + "finished in ".len();
             if let Some(end_offset) = line[duration_start..].find('s') {
                 let end = duration_start + end_offset + 1;
-                line.replace_range(duration_start..end, "finished in duration");
+                line.replace_range(duration_start..end, "duration");
             }
+        }
+        if let Some(start) = line.find("Summary [")
+            && let Some(end_offset) = line[start + "Summary [".len()..].find(']')
+        {
+            let duration_start = start + "Summary [".len();
+            let end = duration_start + end_offset;
+            line.replace_range(duration_start..end, "duration");
         }
         if line.starts_with("error: could not compile") {
             compile_errors.push(line);
@@ -1542,6 +2630,7 @@ mod tests {
                 tests_run: vec![],
                 duration_ms: 0,
                 cache: "miss".into(),
+                command: None,
                 details: None,
             });
         }
