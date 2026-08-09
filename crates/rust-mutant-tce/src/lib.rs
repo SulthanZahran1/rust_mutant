@@ -129,6 +129,10 @@ fn compile_and_collect(
         .arg(target)
         .arg("--quiet")
         .env_remove("RUSTFLAGS")
+        // The parent runner may set CARGO_INCREMENTAL=0 for reproducible
+        // tests. Non-incremental debug LLVM emission can contain only module
+        // metadata for an otherwise public fixture, so TCE owns this setting.
+        .env("CARGO_INCREMENTAL", "1")
         .env("CARGO_ENCODED_RUSTFLAGS", encoded_flags)
         .output()
         .with_context(|| format!("spawn cargo TCE build in {}", project.display()))?;
