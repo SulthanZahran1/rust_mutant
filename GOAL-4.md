@@ -1,6 +1,6 @@
 # GOAL 1.0.0: TCE, reports, contract, and distribution
 
-> **Status:** 🔒 **locked** (locked 2026-08-09 by human — criteria frozen; changes require human renegotiation). See Human check.
+> **Status:** ✅ **signed-off** (locked 2026-08-09, signed-off 2026-08-09 — M4 criteria verified in-session by human). See Human check.
 > **Prerequisite:** [GOAL-3.md](GOAL-3.md) signed-off, plus [the CLI surface contract](https://github.com/SulthanZahran1/rust_mutant/issues/9) resolved before contract freeze.
 > **Scope decided in [GOAL milestone boundaries + fixture sizing contract](https://github.com/SulthanZahran1/rust_mutant/issues/8):** LLVM-IR TCE, Stryker JSON/JUnit/HTML reports, threshold gate, agent-friendly JSON, Windows, crates.io, Homebrew, installer, release artifacts, and Linux/Windows CI.
 
