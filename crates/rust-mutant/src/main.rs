@@ -1,8 +1,10 @@
-use anyhow::{Result, bail};
+use anyhow::{Context, Result, bail};
 use clap::{Parser, ValueEnum};
 use rust_mutant_core::{RunOptions, operator_families, run};
+use rust_mutant_report::{console, html, junit_xml, stryker_json};
+use serde::Deserialize;
 use std::collections::BTreeSet;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::Duration;
 
@@ -13,17 +15,17 @@ use std::time::Duration;
     about = "AST-based mutation testing for Rust"
 )]
 struct Cli {
-    /// Cargo project directory to mutate.
-    #[arg(long, default_value = ".")]
-    path: PathBuf,
+    /// Cargo project directory to mutate. Defaults to the current directory.
+    #[arg(long)]
+    path: Option<PathBuf>,
     #[arg(long)]
     manifest_path: Option<PathBuf>,
     #[arg(long)]
     config: Option<PathBuf>,
     #[arg(long)]
     no_config: bool,
-    #[arg(long, value_enum, default_value_t = Format::Console)]
-    format: Format,
+    #[arg(long, value_enum)]
+    format: Option<Format>,
     #[arg(long)]
     output: Option<PathBuf>,
     #[arg(long)]
@@ -38,12 +40,12 @@ struct Cli {
     operators: Option<String>,
     #[arg(long)]
     mutant: Option<String>,
-    #[arg(long, default_value = "2s", value_parser = parse_duration)]
-    timeout: Duration,
-    #[arg(long, default_value_t = 80.0)]
-    threshold: f64,
-    #[arg(long, default_value_t = 1)]
-    parallel: usize,
+    #[arg(long, value_parser = parse_duration)]
+    timeout: Option<Duration>,
+    #[arg(long)]
+    threshold: Option<f64>,
+    #[arg(long)]
+    parallel: Option<usize>,
     #[arg(long)]
     incremental: bool,
     #[arg(long)]
@@ -67,27 +69,44 @@ enum Format {
     Html,
 }
 
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Config {
+    path: Option<PathBuf>,
+    manifest_path: Option<PathBuf>,
+    format: Option<String>,
+    output: Option<PathBuf>,
+    threshold: Option<f64>,
+    parallel: Option<usize>,
+    timeout: Option<String>,
+    operators: Option<Vec<String>>,
+    no_tce: Option<bool>,
+    no_routing: Option<bool>,
+    no_cache: Option<bool>,
+    incremental: Option<bool>,
+    base_ref: Option<String>,
+    max_memory: Option<u64>,
+}
+
+struct LoadedConfig {
+    value: Config,
+}
+
 fn main() -> ExitCode {
     match real_main() {
         Ok(code) => ExitCode::from(code),
         Err(error) => {
             eprintln!("rust-mutant: {error:#}");
-            ExitCode::from(if error.to_string().contains("no mutants found") {
-                3
-            } else {
-                2
-            })
+            ExitCode::from(2)
         }
     }
 }
 
 fn real_main() -> Result<u8> {
     let cli = Cli::parse();
-    if cli.incremental && cli.base_ref.is_none() {
-        bail!("--incremental requires --base-ref <REF>");
-    }
+    let loaded = load_config(&cli)?;
     if cli.list_operators {
-        if cli.json || matches!(cli.format, Format::Json) {
+        if cli.json || matches!(cli.format, Some(Format::Json)) {
             let values = operator_families()
                 .iter()
                 .map(|family| serde_json::json!({"family": family, "subtypes": []}))
@@ -105,39 +124,149 @@ fn real_main() -> Result<u8> {
         }
         return Ok(0);
     }
-    let operators = cli.operators.as_deref().map(parse_operators).transpose()?;
+
+    let config = loaded.value;
+    let project = cli
+        .path
+        .or(config.path)
+        .unwrap_or_else(|| PathBuf::from("."));
+    let manifest = cli.manifest_path.or(config.manifest_path);
+    let format = if cli.json {
+        Format::Json
+    } else if let Some(format) = cli.format {
+        format
+    } else if let Some(format) = config.format.as_deref() {
+        parse_format(format)?
+    } else {
+        Format::Console
+    };
+    let output = cli.output.or(config.output);
+    let operators = cli
+        .operators
+        .or_else(|| config.operators.map(|values| values.join(",")))
+        .as_deref()
+        .map(parse_operators)
+        .transpose()?;
+    let timeout = match cli.timeout {
+        Some(value) => value,
+        None => match config.timeout.as_deref() {
+            Some(value) => parse_duration(value).map_err(|error| anyhow::anyhow!(error))?,
+            None => Duration::from_secs(2),
+        },
+    };
+    let threshold = cli.threshold.or(config.threshold).unwrap_or(80.0);
+    if !(0.0..=100.0).contains(&threshold) {
+        bail!("--threshold must be between 0 and 100");
+    }
+    let incremental = cli.incremental || config.incremental.unwrap_or(false);
+    let base_ref = cli.base_ref.or(config.base_ref);
+    if incremental && base_ref.is_none() {
+        bail!("--incremental requires --base-ref <REF>");
+    }
     let options = RunOptions {
-        project: cli.path,
-        manifest: cli.manifest_path,
-        timeout: cli.timeout,
-        threshold: Some(cli.threshold),
+        project: project.clone(),
+        manifest,
+        timeout,
+        threshold: Some(threshold),
         operators,
         mutant: cli.mutant,
         dry_run: cli.dry_run,
-        requested_workers: cli.parallel.max(1),
-        no_cache: cli.no_cache,
-        routing: !cli.no_routing,
-        incremental: cli.incremental,
-        base_ref: cli.base_ref,
-        max_memory_mib: cli.max_memory,
-        tce: !cli.no_tce,
+        requested_workers: cli.parallel.or(config.parallel).unwrap_or(1).max(1),
+        no_cache: cli.no_cache || config.no_cache.unwrap_or(false),
+        routing: !(cli.no_routing || config.no_routing.unwrap_or(false)),
+        incremental,
+        base_ref,
+        max_memory_mib: cli.max_memory.or(config.max_memory),
+        tce: !(cli.no_tce || config.no_tce.unwrap_or(false)),
     };
     let report = run(&options)?;
-    let wants_json = cli.json || matches!(cli.format, Format::Json);
-    match cli.format {
-        Format::Console if !wants_json => print_console(&report),
-        Format::Console | Format::Json => print_json(&report, cli.quiet)?,
-        Format::StrykerJson | Format::Junit | Format::Html => {
-            bail!(
-                "--format {:?} is reserved for the M4 report adapters",
-                cli.format
-            )
-        }
-    }
-    if report.summary.threshold_passed {
+    render(&report, format, output.as_deref(), &project, cli.quiet)?;
+    if report.summary.total == 0 {
+        Ok(3)
+    } else if report.summary.threshold_passed {
         Ok(0)
     } else {
         Ok(1)
+    }
+}
+
+fn render(
+    report: &rust_mutant_core::Report,
+    format: Format,
+    output: Option<&Path>,
+    project: &Path,
+    quiet: bool,
+) -> Result<()> {
+    match format {
+        Format::Console => {
+            if !quiet {
+                print!("{}", console::generate(report));
+            }
+        }
+        Format::Json => println!("{}", serde_json::to_string_pretty(report)?),
+        Format::StrykerJson => {
+            let path = report_path(output, project, "mutation-report.json");
+            stryker_json::generate_to_file(report, &path)?;
+            eprintln!("stryker report: {}", path.display());
+        }
+        Format::Junit => {
+            let path = report_path(output, project, "mutation-results.xml");
+            junit_xml::generate_to_file(report, &path)?;
+            eprintln!("junit report: {}", path.display());
+        }
+        Format::Html => {
+            let path = report_path(output, project, "mutation-report.html");
+            html::generate_to_file(report, &path)?;
+            eprintln!("html report: {}", path.display());
+        }
+    }
+    Ok(())
+}
+
+fn report_path(output: Option<&Path>, project: &Path, filename: &str) -> PathBuf {
+    output
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| project.join("mutation-reports"))
+        .join(filename)
+}
+
+fn load_config(cli: &Cli) -> Result<LoadedConfig> {
+    if cli.no_config {
+        return Ok(LoadedConfig {
+            value: Config::default(),
+        });
+    }
+    let auto_path = cli
+        .path
+        .clone()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join(".rust-mutant.toml");
+    let path = cli.config.clone().unwrap_or(auto_path);
+    if !path.is_file() {
+        if cli.config.is_some() {
+            bail!("configuration file does not exist: {}", path.display());
+        }
+        return Ok(LoadedConfig {
+            value: Config::default(),
+        });
+    }
+    let text = std::fs::read_to_string(&path)
+        .with_context(|| format!("read configuration {}", path.display()))?;
+    let value = toml::from_str(&text)
+        .with_context(|| format!("parse TOML configuration {}", path.display()))?;
+    Ok(LoadedConfig { value })
+}
+
+fn parse_format(value: &str) -> Result<Format> {
+    match value.trim().to_ascii_lowercase().replace('_', "-").as_str() {
+        "console" => Ok(Format::Console),
+        "json" => Ok(Format::Json),
+        "stryker-json" | "stryker" => Ok(Format::StrykerJson),
+        "junit" | "junit-xml" => Ok(Format::Junit),
+        "html" => Ok(Format::Html),
+        other => bail!(
+            "unknown report format `{other}`; expected console, json, stryker-json, junit, or html"
+        ),
     }
 }
 
@@ -174,22 +303,4 @@ fn parse_duration(value: &str) -> Result<Duration, String> {
         .parse::<u64>()
         .map(Duration::from_secs)
         .map_err(|_| "timeout must be a duration such as 2s or 500ms".to_string())
-}
-
-fn print_json(report: &rust_mutant_core::Report, _quiet: bool) -> Result<()> {
-    println!("{}", serde_json::to_string_pretty(report)?);
-    Ok(())
-}
-
-fn print_console(report: &rust_mutant_core::Report) {
-    println!("rust-mutant {}", report.tool.version);
-    println!("project: {}", report.project.path);
-    println!("total mutants: {}", report.summary.total);
-    println!("killed: {}", report.summary.killed);
-    println!("survived: {}", report.summary.survived);
-    println!("not covered: {}", report.summary.not_covered);
-    println!("compile error: {}", report.summary.compile_error);
-    println!("timeout: {}", report.summary.timeout);
-    println!("MSI: {:.2}%", report.summary.msi);
-    println!("wall time: {} ms", report.timing.total_ms);
 }

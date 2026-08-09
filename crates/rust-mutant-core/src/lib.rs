@@ -1106,7 +1106,14 @@ pub fn run(options: &RunOptions) -> Result<Report> {
         ));
     }
     if mutants.is_empty() {
-        bail!("no mutants found after operator filters");
+        return Ok(report_for_discovery(
+            &project,
+            &manifest,
+            mutants,
+            discovery_started.elapsed().as_millis(),
+            started.elapsed().as_millis(),
+            options,
+        ));
     }
     let target_dir = external_target_dir(&project);
     if target_dir.exists() {

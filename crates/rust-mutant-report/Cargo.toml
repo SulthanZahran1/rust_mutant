@@ -5,5 +5,7 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+anyhow.workspace = true
 rust-mutant-core = { path = "../rust-mutant-core" }
+serde.workspace = true
 serde_json.workspace = true
