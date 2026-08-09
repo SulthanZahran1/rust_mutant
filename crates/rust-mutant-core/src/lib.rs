@@ -2272,6 +2272,7 @@ fn nextest_binary_path(
                         }
                         #[cfg(not(unix))]
                         {
+                            let _ = meta;
                             true
                         }
                     })
