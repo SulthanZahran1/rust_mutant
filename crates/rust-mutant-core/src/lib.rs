@@ -1737,12 +1737,18 @@ fn memory_budget(requested: Option<u64>) -> Option<u64> {
 }
 
 fn wait_for_memory(budget: Option<u64>) -> u64 {
+    let Some(limit) = budget else {
+        record_peak_rss();
+        return 0;
+    };
+    if current_rss_mib() <= limit {
+        record_peak_rss();
+        return 0;
+    }
     let started = Instant::now();
-    if let Some(limit) = budget {
-        while current_rss_mib() > limit && started.elapsed() < Duration::from_millis(250) {
-            record_peak_rss();
-            thread::sleep(Duration::from_millis(25));
-        }
+    while current_rss_mib() > limit && started.elapsed() < Duration::from_millis(250) {
+        record_peak_rss();
+        thread::sleep(Duration::from_millis(25));
     }
     record_peak_rss();
     started.elapsed().as_millis() as u64
