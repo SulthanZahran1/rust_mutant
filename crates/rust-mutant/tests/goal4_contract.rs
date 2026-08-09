@@ -140,7 +140,26 @@ fn default_tce_has_six_equivalents_and_no_false_equivalents() {
     assert_eq!(output.status.code(), Some(0));
     let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(report["summary"]["total"], 12);
-    assert_eq!(report["summary"]["equivalent"], 6);
+    assert_eq!(
+        report["summary"]["equivalent"],
+        6,
+        "TCE diagnostics: {}",
+        serde_json::to_string(
+            &report["mutants"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter_map(|mutant| {
+                    Some(serde_json::json!({
+                        "id": mutant["id"],
+                        "status": mutant["status"],
+                        "tce": mutant.get("tce")?,
+                    }))
+                })
+                .collect::<Vec<_>>(),
+        )
+        .unwrap()
+    );
     assert_eq!(report["summary"]["killed"], 6);
     assert_eq!(report["summary"]["notCovered"], 0);
     assert!(report["timing"]["tceMs"].as_u64().unwrap() > 0);
