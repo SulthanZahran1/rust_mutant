@@ -3,6 +3,8 @@ name = "rust-mutant-core"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+description.workspace = true
+repository.workspace = true
 
 [dependencies]
 anyhow.workspace = true
@@ -13,3 +15,4 @@ tree-sitter-rust.workspace = true
 walkdir.workspace = true
 libc.workspace = true
 rayon.workspace = true
+rust-mutant-tce = { path = "../rust-mutant-tce", version = "1.0.0" }

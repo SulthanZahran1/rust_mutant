@@ -12,12 +12,16 @@ exclude = [
     "tests/fixtures/operator-probes",
     "tests/fixtures/medium",
     "tests/fixtures/large",
+    "tests/fixtures/tce",
+    "tests/fixtures/empty",
 ]
 
 [workspace.package]
-version = "0.1.0"
+version = "1.0.0"
 edition = "2024"
 license = "MIT"
+repository = "https://github.com/SulthanZahran1/rust_mutant"
+description = "AST-based mutation testing for Rust"
 
 [workspace.dependencies]
 anyhow = "1"
@@ -30,3 +34,4 @@ tree-sitter-rust = "0.24"
 walkdir = "2"
 libc = "0.2"
 rayon = "1"
+toml = "0.8"

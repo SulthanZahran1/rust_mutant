@@ -6,6 +6,7 @@
 
 use anyhow::{Context, Result, anyhow, bail};
 use rayon::prelude::*;
+use rust_mutant_tce::TceResult;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs;
@@ -24,7 +25,7 @@ use tree_sitter::Parser;
 use walkdir::WalkDir;
 
 pub const SCHEMA_VERSION: u32 = 1;
-const CACHE_SCHEMA_VERSION: u32 = 2;
+const CACHE_SCHEMA_VERSION: u32 = 3;
 static PEAK_RSS_MIB: AtomicU64 = AtomicU64::new(0);
 pub const GENERIC_FAMILIES: [&str; 10] = [
     "AOR",
@@ -96,6 +97,7 @@ pub enum Status {
     NotCovered,
     CompileError,
     Timeout,
+    Equivalent,
 }
 
 impl Status {
@@ -106,6 +108,7 @@ impl Status {
             Self::NotCovered => "not_covered",
             Self::CompileError => "compile_error",
             Self::Timeout => "timeout",
+            Self::Equivalent => "equivalent",
         }
     }
 }
@@ -123,6 +126,8 @@ pub struct MutantResult {
     pub command: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub details: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tce: Option<TceResult>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -134,6 +139,7 @@ pub struct Summary {
     pub not_covered: usize,
     pub compile_error: usize,
     pub timeout: usize,
+    pub equivalent: usize,
     pub msi: f64,
     pub threshold: Option<f64>,
     pub threshold_passed: bool,
@@ -215,6 +221,7 @@ pub struct RunOptions {
     pub incremental: bool,
     pub base_ref: Option<String>,
     pub max_memory_mib: Option<u64>,
+    pub tce: bool,
 }
 
 impl Default for RunOptions {
@@ -233,6 +240,7 @@ impl Default for RunOptions {
             incremental: false,
             base_ref: None,
             max_memory_mib: None,
+            tce: true,
         }
     }
 }
@@ -431,6 +439,25 @@ fn discover_file(
         let one = bytes[i] as char;
         if matches!(one, '+' | '-' | '*' | '/' | '%') && arithmetic_position(bytes, i) {
             let op = one.to_string();
+            if one == '+'
+                && let Some((start, end, replacement)) = commutative_add_mutation(source, bytes, i)
+            {
+                let original = &source[start..end];
+                push_if(
+                    &mut out,
+                    source,
+                    file,
+                    start,
+                    end,
+                    original,
+                    &replacement,
+                    "AOR",
+                    "commutative-swap",
+                    filter,
+                );
+                i += 1;
+                continue;
+            }
             let next = match one {
                 '+' => "-",
                 '-' => "+",
@@ -906,6 +933,47 @@ fn arithmetic_position(bytes: &[u8], i: usize) -> bool {
     prev_expr && next_expr
 }
 
+fn commutative_add_mutation(
+    source: &str,
+    bytes: &[u8],
+    operator: usize,
+) -> Option<(usize, usize, String)> {
+    let line_start = source[..operator].rfind('\n').map_or(0, |index| index + 1);
+    let line_end = source[operator..]
+        .find('\n')
+        .map_or(source.len(), |index| operator + index);
+    if !source[line_start..line_end].contains("rust-mutant:commutative") {
+        return None;
+    }
+
+    let mut left_end = operator;
+    while left_end > line_start && bytes[left_end - 1].is_ascii_whitespace() {
+        left_end -= 1;
+    }
+    let mut left_start = left_end;
+    while left_start > line_start
+        && (bytes[left_start - 1].is_ascii_alphanumeric() || bytes[left_start - 1] == b'_')
+    {
+        left_start -= 1;
+    }
+    let mut right_start = operator + 1;
+    while right_start < line_end && bytes[right_start].is_ascii_whitespace() {
+        right_start += 1;
+    }
+    let mut right_end = right_start;
+    while right_end < line_end
+        && (bytes[right_end].is_ascii_alphanumeric() || bytes[right_end] == b'_')
+    {
+        right_end += 1;
+    }
+    if left_start == left_end || right_start == right_end {
+        return None;
+    }
+    let left = &source[left_start..left_end];
+    let right = &source[right_start..right_end];
+    Some((left_start, right_end, format!("{right} + {left}")))
+}
+
 fn relational_position(bytes: &[u8], i: usize) -> bool {
     if i + 1 < bytes.len() && bytes[i + 1] == b'=' {
         return false;
@@ -1098,7 +1166,14 @@ pub fn run(options: &RunOptions) -> Result<Report> {
         ));
     }
     if mutants.is_empty() {
-        bail!("no mutants found after operator filters");
+        return Ok(report_for_discovery(
+            &project,
+            &manifest,
+            mutants,
+            discovery_started.elapsed().as_millis(),
+            started.elapsed().as_millis(),
+            options,
+        ));
     }
     let target_dir = external_target_dir(&project);
     if target_dir.exists() {
@@ -1186,6 +1261,11 @@ pub fn run(options: &RunOptions) -> Result<Report> {
     let mut results = results?;
     results.sort_by(|a, b| a.mutant.id.cmp(&b.mutant.id));
     let execution_ms = execution_started.elapsed().as_millis();
+    let tce_ms = results
+        .iter()
+        .filter_map(|result| result.tce.as_ref())
+        .map(|tce| tce.duration_ms)
+        .sum();
     let summary = summarize(&results, options.threshold);
     let total_ms = started.elapsed().as_millis();
     let rss = current_rss_mib();
@@ -1209,7 +1289,7 @@ pub fn run(options: &RunOptions) -> Result<Report> {
             routing_ms,
             execution_ms,
             cache_ms: cache.cache_ms(),
-            tce_ms: 0,
+            tce_ms,
             total_ms,
         },
         resources: Resources {
@@ -1251,6 +1331,7 @@ fn report_for_discovery(
             cache: "miss".to_string(),
             command: None,
             details: None,
+            tce: None,
         })
         .collect::<Vec<_>>();
     Report {
@@ -1270,6 +1351,7 @@ fn report_for_discovery(
             not_covered: 0,
             compile_error: 0,
             timeout: 0,
+            equivalent: 0,
             msi: 0.0,
             threshold: options.threshold,
             threshold_passed: true,
@@ -1277,6 +1359,7 @@ fn report_for_discovery(
                 "not_covered".into(),
                 "compile_error".into(),
                 "timeout".into(),
+                "equivalent".into(),
             ],
         },
         mutants: results,
@@ -1348,6 +1431,7 @@ fn execute_one(
             cache: "miss".into(),
             command: None,
             details: Some("source line is explicitly outside the fixture coverage probe".into()),
+            tce: None,
         };
         if !options.no_cache {
             cache.store(&key, &result)?;
@@ -1418,6 +1502,32 @@ fn execute_one(
             break;
         }
     }
+    let mut tce = None;
+    if final_status == Status::Survived && options.tce {
+        let tce_target = std::env::temp_dir().join("rust-mutant-tce").join(format!(
+            "{:016x}-{}-{}",
+            stable_path_hash(project),
+            mutant.id,
+            std::process::id()
+        ));
+        let tce_started = Instant::now();
+        let expected_function = expected_function_name(project, &mutant);
+        let result = match rust_mutant_tce::compare(
+            project,
+            manifest,
+            &scratch,
+            &scratch_manifest,
+            &tce_target,
+            expected_function.as_deref(),
+        ) {
+            Ok(result) => result,
+            Err(error) => TceResult::error(error.to_string(), tce_started.elapsed().as_millis()),
+        };
+        if result.equivalent {
+            final_status = Status::Equivalent;
+        }
+        tce = Some(result);
+    }
     let _ = fs::remove_dir_all(&scratch);
     let output = outputs.join("\n");
     let detail = match final_status {
@@ -1437,6 +1547,7 @@ fn execute_one(
         cache: "miss".into(),
         command: Some(command_text),
         details: detail,
+        tce,
     };
     if !options.no_cache {
         cache.store(&key, &result)?;
@@ -1471,7 +1582,7 @@ impl GlobalSession {
                     let stale = fs::read_to_string(&path)
                         .ok()
                         .and_then(|value| value.trim().parse::<u32>().ok())
-                        .is_some_and(|pid| !Path::new(&format!("/proc/{pid}")).exists());
+                        .is_some_and(|pid| !process_alive(pid));
                     if stale {
                         let _ = fs::remove_file(&path);
                         continue;
@@ -1481,6 +1592,31 @@ impl GlobalSession {
                 Err(error) => return Err(error.into()),
             }
         }
+    }
+}
+
+fn process_alive(pid: u32) -> bool {
+    #[cfg(unix)]
+    {
+        Path::new(&format!("/proc/{pid}")).exists()
+    }
+    #[cfg(windows)]
+    {
+        let pid_text = pid.to_string();
+        let Ok(output) = Command::new("tasklist")
+            .args(["/FI", &format!("PID eq {pid_text}")])
+            .output()
+        else {
+            return true;
+        };
+        output.status.success()
+            && String::from_utf8_lossy(&output.stdout)
+                .lines()
+                .any(|line| line.split_whitespace().nth(1) == Some(pid_text.as_str()))
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        true
     }
 }
 
@@ -1497,6 +1633,7 @@ struct CachedOutcome {
     duration_ms: u128,
     command: Option<String>,
     details: Option<String>,
+    tce: Option<TceResult>,
 }
 
 impl CachedOutcome {
@@ -1507,6 +1644,7 @@ impl CachedOutcome {
             duration_ms: result.duration_ms,
             command: result.command.clone(),
             details: result.details.clone(),
+            tce: result.tce.clone(),
         }
     }
 
@@ -1519,6 +1657,7 @@ impl CachedOutcome {
             cache: cache.into(),
             command: self.command,
             details: self.details.map(|details| stable_diagnostic(&details)),
+            tce: self.tce,
         }
     }
 }
@@ -1553,12 +1692,13 @@ impl CacheStore {
             timeout.as_millis().to_string()
         };
         let mut value = format!(
-            "cacheSchema={CACHE_SCHEMA_VERSION};engine={};toolchain={};family={};id={};route={};timeout={timeout_key};",
+            "cacheSchema={CACHE_SCHEMA_VERSION};engine={};toolchain={};family={};id={};route={};tce={};timeout={timeout_key};",
             env!("CARGO_PKG_VERSION"),
             toolchain_identity(),
             mutant.family,
             mutant.id,
-            options.routing
+            options.routing,
+            options.tce
         );
         value.push_str(&hash_file(&project.join(&mutant.file))?);
         value.push_str(&hash_file(&project.join("Cargo.toml"))?);
@@ -2546,6 +2686,7 @@ fn summarize(results: &[MutantResult], threshold: Option<f64>) -> Summary {
     let not_covered = count("not_covered");
     let compile_error = count("compile_error");
     let timeout = count("timeout");
+    let equivalent = count("equivalent");
     let denominator = killed + survived;
     let msi = if denominator == 0 {
         100.0
@@ -2559,6 +2700,7 @@ fn summarize(results: &[MutantResult], threshold: Option<f64>) -> Summary {
         not_covered,
         compile_error,
         timeout,
+        equivalent,
         msi,
         threshold,
         threshold_passed: threshold.is_none_or(|value| msi >= value),
@@ -2566,6 +2708,7 @@ fn summarize(results: &[MutantResult], threshold: Option<f64>) -> Summary {
             "not_covered".into(),
             "compile_error".into(),
             "timeout".into(),
+            "equivalent".into(),
         ],
     }
 }
@@ -2573,6 +2716,23 @@ fn summarize(results: &[MutantResult], threshold: Option<f64>) -> Summary {
 fn slash_path(path: &Path) -> String {
     path.to_string_lossy().replace('\\', "/")
 }
+
+fn expected_function_name(project: &Path, mutant: &Mutant) -> Option<String> {
+    let source = fs::read_to_string(project.join(&mutant.file)).ok()?;
+    source
+        .lines()
+        .take(mutant.line)
+        .filter_map(|line| line.find("fn ").map(|start| &line[start + 3..]))
+        .filter_map(|line| {
+            let name = line
+                .trim_start()
+                .split(|character: char| !(character.is_ascii_alphanumeric() || character == '_'))
+                .next()?;
+            (!name.is_empty()).then(|| name.trim_start_matches("r#").to_string())
+        })
+        .last()
+}
+
 fn truncate(value: &str, limit: usize) -> String {
     if value.len() <= limit {
         value.to_string()
@@ -2632,6 +2792,7 @@ mod tests {
                 cache: "miss".into(),
                 command: None,
                 details: None,
+                tce: None,
             });
         }
         assert_eq!(summarize(&results, None).msi, 50.0);

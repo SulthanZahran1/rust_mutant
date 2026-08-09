@@ -3,6 +3,8 @@ name = "rust-mutant"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+description.workspace = true
+repository.workspace = true
 
 [[bin]]
 name = "rust-mutant"
@@ -11,5 +13,8 @@ path = "src/main.rs"
 [dependencies]
 anyhow.workspace = true
 clap.workspace = true
-rust-mutant-core = { path = "../rust-mutant-core" }
+rust-mutant-core = { path = "../rust-mutant-core", version = "1.0.0" }
+rust-mutant-report = { path = "../rust-mutant-report", version = "1.0.0" }
 serde_json.workspace = true
+serde.workspace = true
+toml.workspace = true
