@@ -1,0 +1,8 @@
+[package]
+name = "rust-mutant-tce"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+rust-mutant-core = { path = "../rust-mutant-core" }

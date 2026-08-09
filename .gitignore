@@ -1,0 +1,6 @@
+/target/
+**/target/
+.rust-mutant/
+mutation-reports/
+*.profraw
+*.profdata

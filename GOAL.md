@@ -7,7 +7,7 @@
 
 | Document | Version | Focus | State | Human check |
 |---|---:|---|---|---|
-| [GOAL-1.md](GOAL-1.md) | `0.1.0` | Engine skeleton and generic operators | draft | End-to-end mutation run on a small Rust fixture |
+| [GOAL-1.md](GOAL-1.md) | `0.1.0` | Engine skeleton and generic operators | 🔒 locked | End-to-end mutation run on a small Rust fixture |
 | [GOAL-2.md](GOAL-2.md) | `0.2.0` | Rust-idiomatic operators and fixture contract | draft | All 18 families and all fixture buckets live |
 | [GOAL-3.md](GOAL-3.md) | `0.3.0` | Routing, timeouts, parallelism, cache, incremental mode | draft | Routing correctness and warm-cache demo |
 | [GOAL-4.md](GOAL-4.md) | `1.0.0` | TCE, reports, frozen contract, distribution | draft | Full release demo on Linux and Windows |
