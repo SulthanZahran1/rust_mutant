@@ -1,6 +1,6 @@
 # GOAL 0.3.0: routing, timeouts, and speed
 
-> **Status:** 🔒 **locked** (locked 2026-08-09 by human — criteria frozen; changes require human renegotiation). See Human check.
+> **Status:** ✅ **signed-off** (signed off 2026-08-09 by human after the live M3 receipt review). Criteria remain frozen; changes require human renegotiation. See Human check.
 > **Prerequisite:** [GOAL-2.md](GOAL-2.md) signed-off.
 > **Scope decided in [GOAL milestone boundaries + fixture sizing contract](https://github.com/SulthanZahran1/rust_mutant/issues/8) and [CLI surface contract](https://github.com/SulthanZahran1/rust_mutant/issues/9):** per-test coverage routing, adaptive timeouts, bounded parallel scheduling, host-wide CPU/RAM resource coordination, content-addressed cache, incremental mode, and single-mutant debugging. TCE and distribution remain M4.
 
