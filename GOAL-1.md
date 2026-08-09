@@ -22,9 +22,11 @@ A Cargo workspace contains a core library and a `rust-mutant` binary. The binary
 
 Discovery covers the locked 10 generic table-stakes families: AOR, AOD, AOI, ROR, LOR, LCR, COR, SDL, RVR, and loop increment/decrement. Each discovered point carries a stable mutant id, file identity, line, column, family, subtype, original text, and replacement text.
 
-**Test:** `rust-mutant --path tests/fixtures/small --dry-run --json` and a parser/operator unit-test suite.
+**Test:** `rust-mutant --path tests/fixtures/operator-probes --dry-run --json`, `rust-mutant --path tests/fixtures/small --dry-run --json`, and a parser/operator unit-test suite.
 
-**Pass:** every generic family exercised by the fixture produces at least one point; JSON fields are present; source spans are valid UTF-8 boundaries and point at the expected original text.
+**Pass:** every generic family produces at least one point in the dedicated operator-probes fixture described in the [canonical fixture roles](GOAL.md#canonical-fixture-roles); the mixed-outcome small fixture is not required to cover all ten families; JSON fields are present; source spans are valid UTF-8 boundaries and point at the expected original text.
+
+The operator-probes fixture is a discovery/application probe suite, not a second full mutation campaign. It keeps M1's ten-family coverage explicit without forcing the 12–15 mutant outcome fixture to carry every operator combination.
 
 ### 3. Source-only application
 
@@ -50,13 +52,13 @@ The default report prints total mutants, per-outcome counts, MSI, and wall time.
 
 **Pass:** totals agree, counts sum to total, MSI is numerically correct, and a repeat run is identical apart from explicitly documented timing fields.
 
-### 6. Small correctness fixture
+### 6. Small outcome fixture
 
-The M1 fixture uses safe generic constructs and contains 12–15 mutants. It is designed for clean correctness, not full operator coverage.
+The [canonical small outcome fixture](GOAL.md#canonical-fixture-roles) uses safe generic constructs and contains 12–15 mutants deliberately spanning all five initial outcome buckets. It is an engine-classification smoke fixture, not a pure 100%-killed correctness fixture and does not require zero compile errors.
 
-**Test:** run the real release binary against `tests/fixtures/small` on the reference two-core Linux box after a baseline `cargo test`.
+**Test:** run the real release binary against `tests/fixtures/small` on the reference two-core Linux box after a baseline `cargo test`; hand-check one representative mutant from each outcome bucket.
 
-**Pass:** 12–15 mutants, 100% killed, zero compile errors, green baseline, and cold wall time no greater than 20 seconds.
+**Pass:** 12–15 mutants, `killed`, `survived`, `not_covered`, `compile_error`, and `timeout` are all present and correctly classified, counts sum to total, the baseline is green, and cold wall time is no greater than 20 seconds.
 
 ## Implementation Rules
 
@@ -77,7 +79,7 @@ The agent runs live in front of the human:
 
 1. `cargo build --release` and `rust-mutant --help`, showing real exit codes.
 2. The small fixture baseline, dry-run JSON, and full JSON run, including counts and the <=20s timing gate.
-3. A hand-applied mutant in a scratch copy, demonstrating that the observed test result maps to the reported classification.
+3. One hand-applied representative mutant from each of the five outcome buckets in a scratch copy, demonstrating that the observed test result maps to the reported classification.
 4. A real small Rust crate chosen by the human, with the original tree hash verified before and after.
 
 **Sign-off:** the human confirms the M1 criteria in-session; the document can then be marked signed-off.

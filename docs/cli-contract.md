@@ -82,7 +82,7 @@ The root object contains at least:
 --timeout <DURATION>
 --incremental
 --base-ref <REF>
---detect-equivalent
+--no-tce
 --threshold <PERCENT>
 --no-routing
 --no-cache
@@ -97,9 +97,9 @@ Defaults:
 - deterministic mutant ordering
 - adaptive timeout when available
 - routing and cache enabled once M3 exists
-- TCE disabled unless explicitly requested
+- TCE enabled automatically after survivors
 
-`--mutant` accepts a stable mutant id. A numeric discovery index may be supported as a convenience alias. `--incremental` requires `--base-ref`. `--dry-run` performs discovery only and never runs the baseline or mutants.
+`--mutant` accepts a stable mutant id. A numeric discovery index may be supported as a convenience alias. `--incremental` requires `--base-ref`. `--dry-run` performs discovery only and never runs the baseline or mutants. Post-survival LLVM-IR equivalence analysis is enabled by default in M4; `--no-tce` disables it for the run.
 
 ## Global resource governor
 
