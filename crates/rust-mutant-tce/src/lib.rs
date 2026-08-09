@@ -110,7 +110,8 @@ fn compile_and_collect(
     expected_function: Option<&str>,
 ) -> Result<String> {
     let package = package_name(manifest)?;
-    let remap = format!("--remap-path-prefix={}=/SRC", project.display());
+    let project_prefix = project.to_string_lossy().replace('\\', "/");
+    let remap = format!("--remap-path-prefix={project_prefix}=/SRC");
     let encoded_flags = [
         "-C",
         "opt-level=2",
@@ -129,6 +130,10 @@ fn compile_and_collect(
         .arg(target)
         .arg("--quiet")
         .env_remove("RUSTFLAGS")
+        // The parent runner may set CARGO_INCREMENTAL=0 for reproducible
+        // tests. Non-incremental debug LLVM emission can contain only module
+        // metadata for an otherwise public fixture, so TCE owns this setting.
+        .env("CARGO_INCREMENTAL", "1")
         .env("CARGO_ENCODED_RUSTFLAGS", encoded_flags)
         .output()
         .with_context(|| format!("spawn cargo TCE build in {}", project.display()))?;
@@ -225,9 +230,13 @@ fn normalize_ir(ir: &str) -> String {
             line = "source_filename = \"/SRC\"".into();
         } else if line.trim_start().starts_with("ModuleID =") {
             line = "ModuleID = 'MODULE'".into();
+        } else if line.trim_start().starts_with("; ModuleID =") {
+            line = "; ModuleID = 'MODULE'".into();
         }
         line = normalize_alloc_names(&line);
+        line = normalize_crate_disambiguators(&line);
         line = normalize_panic_location(&line);
+        line = normalize_llvm_directories(&line);
         line = normalize_commutative_add(&line);
         lines.push(line);
     }
@@ -276,6 +285,45 @@ fn normalize_panic_location(line: &str) -> String {
     let end = start + 2 + end_offset + 1;
     let mut result = line.to_string();
     result.replace_range(start..end, "c\\\"LOC\\\"");
+    result
+}
+
+fn normalize_crate_disambiguators(line: &str) -> String {
+    let bytes = line.as_bytes();
+    let mut result = String::with_capacity(line.len());
+    let mut index = 0usize;
+    while index < bytes.len() {
+        if bytes[index..].starts_with(b"Cs") {
+            let hash_start = index + 2;
+            let mut hash_end = hash_start;
+            while hash_end < bytes.len() && bytes[hash_end].is_ascii_alphanumeric() {
+                hash_end += 1;
+            }
+            if hash_end > hash_start && hash_end < bytes.len() && bytes[hash_end] == b'_' {
+                result.push_str("CsHASH");
+                index = hash_end;
+                continue;
+            }
+        }
+        result.push(bytes[index] as char);
+        index += 1;
+    }
+    result
+}
+
+fn normalize_llvm_directories(line: &str) -> String {
+    let marker = "directory: \"";
+    let mut result = line.to_string();
+    let mut search_from = 0usize;
+    while let Some(relative) = result[search_from..].find(marker) {
+        let content_start = search_from + relative + marker.len();
+        let Some(end_offset) = result[content_start..].find('"') else {
+            break;
+        };
+        let content_end = content_start + end_offset;
+        result.replace_range(content_start..content_end, "/SRC");
+        search_from = content_start + "/SRC".len();
+    }
     result
 }
 

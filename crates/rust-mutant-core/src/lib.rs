@@ -2272,6 +2272,7 @@ fn nextest_binary_path(
                         }
                         #[cfg(not(unix))]
                         {
+                            let _ = meta;
                             true
                         }
                     })
@@ -2608,14 +2609,14 @@ fn stable_path_hash(path: &Path) -> u64 {
 }
 
 fn stable_diagnostic(value: &str) -> String {
-    let mut result = value.to_string();
-    let scratch_prefix = "/tmp/rust-mutant-scratch-";
-    while let Some(start) = result.find(scratch_prefix) {
-        let suffix_start = start + scratch_prefix.len();
+    let mut result = strip_ansi(value);
+    let scratch_marker = "rust-mutant-scratch-";
+    while let Some(start) = result.find(scratch_marker) {
+        let suffix_start = start + scratch_marker.len();
         let end = result[suffix_start..]
-            .find('/')
+            .find(['/', '\\'])
             .map_or(result.len(), |offset| suffix_start + offset);
-        result.replace_range(start..end, "/tmp/rust-mutant-scratch");
+        result.replace_range(start..end, "rust-mutant-scratch");
     }
     let mut search_from = 0usize;
     while let Some(relative) = result[search_from..].find("thread '") {
@@ -2669,6 +2670,26 @@ fn stable_diagnostic(value: &str) -> String {
         normalized.push('\n');
     }
     normalized
+}
+
+fn strip_ansi(value: &str) -> String {
+    let mut result = String::with_capacity(value.len());
+    let mut characters = value.chars();
+    while let Some(character) = characters.next() {
+        if character != '\u{1b}' {
+            result.push(character);
+            continue;
+        }
+        if characters.next() != Some('[') {
+            continue;
+        }
+        for character in characters.by_ref() {
+            if ('@'..='~').contains(&character) {
+                break;
+            }
+        }
+    }
+    result
 }
 
 fn looks_like_compile_error(output: &str) -> bool {
