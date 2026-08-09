@@ -1,6 +1,6 @@
 # GOAL 0.2.0: Rust-idiomatic operators and fixtures
 
-> **Status:** 🔒 **locked** (locked 2026-08-09). Criteria frozen for implementation. See Human check.
+> **Status:** ✅ **signed-off** (signed off 2026-08-09 by human after the live M2 receipt review). Criteria remain frozen; changes require human renegotiation. See Human check.
 > **Prerequisite:** [GOAL-1.md](GOAL-1.md) signed-off.
 > **Scope decided in [Rust-idiomatic operator set](https://github.com/SulthanZahran1/rust_mutant/issues/7) and [GOAL milestone boundaries + fixture sizing contract](https://github.com/SulthanZahran1/rust_mutant/issues/8):** all 18 public families, three Rust-calibrated fixtures, and deliberate five-bucket classification. No TCE or release distribution yet.
 
