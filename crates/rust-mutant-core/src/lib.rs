@@ -742,29 +742,30 @@ fn discover_line_mutants(
         let content = line.trim_end_matches(['\n', '\r']);
         let code_content = content.split("//").next().unwrap_or(content).trim_end();
         let trimmed = code_content.trim();
-        if trimmed.contains("return ") && trimmed.ends_with(';') {
-            if let Some(pos) = content.find("return ") {
-                let expr_start = pos + "return ".len();
-                let expr_end = content.rfind(';').unwrap_or(content.len());
-                let expr = &content[expr_start..expr_end];
-                let replacement = if expr.contains(['<', '>', '=', '&', '|']) {
-                    "false"
-                } else {
-                    ""
-                };
-                push_if(
-                    out,
-                    source,
-                    file,
-                    offset + expr_start,
-                    offset + expr_end,
-                    expr,
-                    replacement,
-                    "RVR",
-                    "return-value",
-                    filter,
-                );
-            }
+        if trimmed.contains("return ")
+            && trimmed.ends_with(';')
+            && let Some(pos) = content.find("return ")
+        {
+            let expr_start = pos + "return ".len();
+            let expr_end = content.rfind(';').unwrap_or(content.len());
+            let expr = &content[expr_start..expr_end];
+            let replacement = if expr.contains(['<', '>', '=', '&', '|']) {
+                "false"
+            } else {
+                ""
+            };
+            push_if(
+                out,
+                source,
+                file,
+                offset + expr_start,
+                offset + expr_end,
+                expr,
+                replacement,
+                "RVR",
+                "return-value",
+                filter,
+            );
         }
         if trimmed.ends_with(';')
             && !trimmed.starts_with("let ")
@@ -793,6 +794,7 @@ fn discover_line_mutants(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn push_if(
     out: &mut Vec<Mutant>,
     source: &str,
