@@ -85,6 +85,10 @@ pub fn compare(
     )?;
     let original_hash = stable_hash(&original_ir);
     let mutant_hash = stable_hash(&mutant_ir);
+    if std::env::var_os("RUST_MUTANT_TCE_DUMP").is_some() {
+        fs::write(target_root.join("original.normalized.ll"), &original_ir)?;
+        fs::write(target_root.join("mutant.normalized.ll"), &mutant_ir)?;
+    }
     let equivalent = original_ir == mutant_ir;
 
     Ok(TceResult {

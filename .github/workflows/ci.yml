@@ -29,6 +29,20 @@ jobs:
         run: cargo clippy --workspace --all-targets -- -D warnings
       - name: Install nextest
         uses: taiki-e/install-action@nextest
+      - name: Windows TCE diagnostic
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          RUST_MUTANT_TCE_DUMP: '1'
+        run: |
+          cargo run --quiet -- --path tests/fixtures/tce --operators AOR --format json --threshold 0 --no-cache > "$env:TEMP\\rust-mutant-tce-debug.json"
+          $original = Get-ChildItem -Path "$env:TEMP\\rust-mutant-tce" -Recurse -Filter original.normalized.ll | Select-Object -First 1
+          if (-not $original) { throw 'TCE diagnostic did not produce normalized IR' }
+          $mutant = Join-Path $original.DirectoryName mutant.normalized.ll
+          Write-Output "--- ORIGINAL NORMALIZED IR: $($original.FullName) ---"
+          Get-Content $original.FullName
+          Write-Output "--- MUTANT NORMALIZED IR: $mutant ---"
+          Get-Content $mutant
       - name: Unit and documentation tests
         # Contract tests mutate shared fixture scratch/report resources.
         run: cargo test --workspace -- --test-threads=1
