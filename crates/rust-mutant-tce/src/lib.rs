@@ -85,10 +85,6 @@ pub fn compare(
     )?;
     let original_hash = stable_hash(&original_ir);
     let mutant_hash = stable_hash(&mutant_ir);
-    if std::env::var_os("RUST_MUTANT_TCE_DUMP").is_some() {
-        fs::write(target_root.join("original.normalized.ll"), &original_ir)?;
-        fs::write(target_root.join("mutant.normalized.ll"), &mutant_ir)?;
-    }
     let equivalent = original_ir == mutant_ir;
 
     Ok(TceResult {
@@ -234,6 +230,8 @@ fn normalize_ir(ir: &str) -> String {
             line = "source_filename = \"/SRC\"".into();
         } else if line.trim_start().starts_with("ModuleID =") {
             line = "ModuleID = 'MODULE'".into();
+        } else if line.trim_start().starts_with("; ModuleID =") {
+            line = "; ModuleID = 'MODULE'".into();
         }
         line = normalize_alloc_names(&line);
         line = normalize_crate_disambiguators(&line);
