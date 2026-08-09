@@ -1508,6 +1508,7 @@ impl CacheStore {
             "schema={SCHEMA_VERSION};family={};id={};route={};timeout={timeout_key};",
             mutant.family, mutant.id, options.routing
         );
+        value.push_str(&hash_file(&project.join(&mutant.file))?);
         value.push_str(&hash_file(&project.join("Cargo.toml"))?);
         for entry in WalkDir::new(project.join("tests"))
             .follow_links(false)
