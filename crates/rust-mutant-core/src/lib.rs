@@ -3031,6 +3031,14 @@ mod tests {
         .unwrap();
         assert_eq!(selected[0].id, "m0001-first");
 
+        let selected = select_mutants(
+            mutants.clone(),
+            None,
+            Some(&BTreeSet::from(["1-first".to_string()])),
+        )
+        .unwrap();
+        assert_eq!(selected[0].id, "m0001-first");
+
         let selected = select_mutants(mutants, Some("2"), None).unwrap();
         assert_eq!(selected[0].id, "m0002-second");
     }
