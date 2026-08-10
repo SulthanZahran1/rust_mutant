@@ -46,6 +46,30 @@ fn help_lists_frozen_contract_surface() {
 }
 
 #[test]
+fn mutually_exclusive_mutant_selectors_have_contract_exit_two() {
+    let manifest = report_dir("mutants-file").join("ids.txt");
+    fs::write(&manifest, "1\n").expect("mutant manifest should be writable");
+    let output = run(&[
+        "--path",
+        fixture("tce").to_str().unwrap(),
+        "--mutant",
+        "1",
+        "--mutants-file",
+        manifest.to_str().unwrap(),
+        "--dry-run",
+    ]);
+    let _ = fs::remove_file(&manifest);
+    assert_eq!(
+        output.status.code(),
+        Some(2),
+        "stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(String::from_utf8_lossy(&output.stderr).contains("mutually exclusive"));
+}
+
+#[test]
 fn invalid_project_has_contract_exit_two() {
     let output = run(&[
         "--path",
