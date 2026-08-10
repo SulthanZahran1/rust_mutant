@@ -8,7 +8,8 @@ AST-based mutation testing for Rust — the third sibling of dart_mutant and gop
 
 ## Status
 
-- **Planning** — wayfinder map charted 2026-08-08; GOAL milestone drafts are on the `docs/goal-milestones` branch. No code yet.
+- **1.0.0 implementation complete and signed off** on canonical `main`; GOAL-1 through GOAL-4 are merged and their Linux/Windows verification is recorded on the Wayfinder map.
+- The Wayfinder map remains the long-running tracker; its research and decision tickets are closed. Post-map maintenance is delivered through normal branch-to-PR review.
 
 ## Agent skills
 

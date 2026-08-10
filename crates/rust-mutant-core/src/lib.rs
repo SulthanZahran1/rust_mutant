@@ -16,7 +16,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant};
 use std::{
     io::{Read, Write},
     thread,
@@ -214,6 +214,7 @@ pub struct RunOptions {
     pub threshold: Option<f64>,
     pub operators: Option<BTreeSet<String>>,
     pub mutant: Option<String>,
+    pub mutant_ids: Option<BTreeSet<String>>,
     pub dry_run: bool,
     pub requested_workers: usize,
     pub no_cache: bool,
@@ -233,6 +234,7 @@ impl Default for RunOptions {
             threshold: Some(80.0),
             operators: None,
             mutant: None,
+            mutant_ids: None,
             dry_run: false,
             requested_workers: 1,
             no_cache: false,
@@ -399,7 +401,7 @@ fn discover_file(
                     ">=" => "<",
                     "==" => "!=",
                     "!=" => "==",
-                    _ => "<",
+                    _ => unreachable!("unrecognized relational operator: {op}"),
                 };
                 if relational_operators.contains(&i) {
                     push_if(
@@ -1164,6 +1166,64 @@ fn stable_id(m: &Mutant) -> String {
     format!("{hash:016x}")
 }
 
+fn numeric_mutant_index(requested: &str) -> Option<usize> {
+    let digits = requested.strip_prefix('m').unwrap_or(requested);
+    if digits.is_empty() || !digits.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    digits.parse().ok()
+}
+
+fn mutant_id_matches(discovered: &str, discovery_index: usize, requested: &str) -> bool {
+    discovered == requested
+        || numeric_mutant_index(requested) == Some(discovery_index)
+        || discovered.trim_start_matches('m').trim_start_matches('0') == requested
+}
+
+fn select_mutants(
+    mut mutants: Vec<Mutant>,
+    mutant: Option<&str>,
+    mutant_ids: Option<&BTreeSet<String>>,
+) -> Result<Vec<Mutant>> {
+    if mutant.is_some() && mutant_ids.is_some() {
+        bail!("single and multi-mutant selectors are mutually exclusive");
+    }
+    if let Some(ids) = mutant_ids {
+        let missing = ids
+            .iter()
+            .filter(|requested| {
+                !mutants.iter().enumerate().any(|(index, candidate)| {
+                    mutant_id_matches(&candidate.id, index + 1, requested)
+                })
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        if !missing.is_empty() {
+            bail!(
+                "requested mutant IDs were not discovered: {}",
+                missing.join(", ")
+            );
+        }
+        mutants = mutants
+            .into_iter()
+            .enumerate()
+            .filter(|(index, candidate)| {
+                ids.iter()
+                    .any(|requested| mutant_id_matches(&candidate.id, index + 1, requested))
+            })
+            .map(|(_, mutant)| mutant)
+            .collect();
+    } else if let Some(requested) = mutant {
+        mutants = mutants
+            .into_iter()
+            .enumerate()
+            .filter(|(index, candidate)| mutant_id_matches(&candidate.id, index + 1, requested))
+            .map(|(_, mutant)| mutant)
+            .collect();
+    }
+    Ok(mutants)
+}
+
 pub fn run(options: &RunOptions) -> Result<Report> {
     let started = Instant::now();
     let session = GlobalSession::acquire()?;
@@ -1174,6 +1234,7 @@ pub fn run(options: &RunOptions) -> Result<Report> {
     if !project.is_dir() {
         bail!("project path is not a directory: {}", project.display());
     }
+    let _scratch_cleanup = ScratchCleanupGuard::new(&project)?;
     let manifest = options
         .manifest
         .clone()
@@ -1187,11 +1248,11 @@ pub fn run(options: &RunOptions) -> Result<Report> {
         bail!("Cargo manifest does not exist: {}", manifest.display());
     }
     let discovery_started = Instant::now();
-    let mut mutants = discover(&project, options.operators.as_ref())?;
-    if let Some(id) = &options.mutant {
-        mutants
-            .retain(|m| &m.id == id || m.id.trim_start_matches('m').trim_start_matches('0') == id);
-    }
+    let mutants = select_mutants(
+        discover(&project, options.operators.as_ref())?,
+        options.mutant.as_deref(),
+        options.mutant_ids.as_ref(),
+    )?;
     if options.dry_run {
         return Ok(report_for_discovery(
             &project,
@@ -1217,10 +1278,19 @@ pub fn run(options: &RunOptions) -> Result<Report> {
         fs::remove_dir_all(&target_dir)
             .with_context(|| format!("clean mutation target {}", target_dir.display()))?;
     }
+    let capacity = effective_cpu_capacity();
+    let global_cpu_budget = (capacity.saturating_mul(3) / 4).max(1);
+    let effective_workers = options.requested_workers.min(global_cpu_budget).max(1);
+    let memory_budget = memory_budget(options.max_memory_mib);
+    let baseline_target_dir = if effective_workers == 1 {
+        target_dir.join("worker-0")
+    } else {
+        target_dir.clone()
+    };
     let baseline = cargo_test(
         &project,
         &manifest,
-        &target_dir,
+        &baseline_target_dir,
         options.timeout.max(Duration::from_secs(10)),
         None,
     )?;
@@ -1254,10 +1324,6 @@ pub fn run(options: &RunOptions) -> Result<Report> {
     } else {
         options.timeout
     };
-    let capacity = effective_cpu_capacity();
-    let global_cpu_budget = (capacity.saturating_mul(3) / 4).max(1);
-    let effective_workers = options.requested_workers.min(global_cpu_budget).max(1);
-    let memory_budget = memory_budget(options.max_memory_mib);
     let rss_before = current_rss_mib();
     PEAK_RSS_MIB.store(rss_before, Ordering::Relaxed);
     let throttled_before = memory_budget.is_some_and(|budget| rss_before > budget);
@@ -1475,9 +1541,14 @@ fn execute_one(
         }
         return Ok(result);
     }
-    let scratch = scratch_dir(&mutant.id);
-    copy_project(project, &scratch)?;
+    let worker = rayon::current_thread_index().unwrap_or(0);
+    let scratch = worker_scratch_dir(project, worker);
+    if !scratch.exists() {
+        copy_project(project, &scratch)?;
+    }
     let target_file = scratch.join(&mutant.file);
+    restore_source_file(project, &scratch, &mutant.file)?;
+    let restore_guard = SourceRestoreGuard::new(project.join(&mutant.file), target_file.clone());
     let mut source = fs::read_to_string(&target_file)
         .with_context(|| format!("read scratch source {}", target_file.display()))?;
     if mutant.end_byte > source.len()
@@ -1485,7 +1556,6 @@ fn execute_one(
         || !source.is_char_boundary(mutant.end_byte)
         || source.get(mutant.start_byte..mutant.end_byte) != Some(mutant.original.as_str())
     {
-        let _ = fs::remove_dir_all(&scratch);
         bail!(
             "mutant {} no longer matches {}:{}",
             mutant.id,
@@ -1565,7 +1635,7 @@ fn execute_one(
         }
         tce = Some(result);
     }
-    let _ = fs::remove_dir_all(&scratch);
+    restore_guard.restore()?;
     let output = outputs.join("\n");
     let detail = match final_status {
         Status::Killed => Some(truncate(&stable_diagnostic(&output), 2000)),
@@ -2476,6 +2546,8 @@ fn cargo_test(
     command
         .current_dir(cwd)
         .arg("test")
+        .arg("--jobs")
+        .arg("1")
         .arg("--manifest-path")
         .arg(manifest)
         .arg("--target-dir")
@@ -2487,7 +2559,10 @@ fn cargo_test(
         command.arg(filter);
     }
     let command_text = format!("cargo test --manifest-path {}", manifest.display());
-    command.stdout(Stdio::piped()).stderr(Stdio::piped());
+    command
+        .env("CARGO_BUILD_JOBS", "1")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
     let mut child = command
         .spawn()
         .with_context(|| format!("spawn cargo test in {}", cwd.display()))?;
@@ -2510,6 +2585,10 @@ fn cargo_nextest(
         .current_dir(cwd)
         .arg("nextest")
         .arg("run")
+        .arg("--build-jobs")
+        .arg("1")
+        .arg("--test-threads")
+        .arg("1")
         .arg("--manifest-path")
         .arg(manifest)
         .arg("--target-dir")
@@ -2524,7 +2603,10 @@ fn cargo_nextest(
         command.arg("--test").arg(&test.binary).arg(&test.name);
         command_text.push_str(&format!(" --test {} {}", test.binary, test.name));
     }
-    command.stdout(Stdio::piped()).stderr(Stdio::piped());
+    command
+        .env("CARGO_BUILD_JOBS", "1")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
     let mut child = command
         .spawn()
         .with_context(|| format!("spawn cargo nextest in {}", cwd.display()))?;
@@ -2548,17 +2630,12 @@ fn classify_command(command: &CommandResult) -> Status {
 fn wait_child(child: &mut Child, timeout: Duration) -> Result<CommandResult> {
     let start = Instant::now();
     let mut timed_out = false;
+    let stdout_reader = child.stdout.take().map(spawn_pipe_reader);
+    let stderr_reader = child.stderr.take().map(spawn_pipe_reader);
     loop {
         record_peak_rss();
         if let Some(status) = child.try_wait()? {
-            let mut stdout = String::new();
-            let mut stderr = String::new();
-            if let Some(mut pipe) = child.stdout.take() {
-                pipe.read_to_string(&mut stdout)?;
-            }
-            if let Some(mut pipe) = child.stderr.take() {
-                pipe.read_to_string(&mut stderr)?;
-            }
+            let (stdout, stderr) = join_pipe_readers(stdout_reader, stderr_reader)?;
             return Ok(CommandResult {
                 code: status.code(),
                 timed_out,
@@ -2579,14 +2656,7 @@ fn wait_child(child: &mut Child, timeout: Duration) -> Result<CommandResult> {
             }
             let _ = child.kill();
             let status = child.wait()?;
-            let mut stdout = String::new();
-            let mut stderr = String::new();
-            if let Some(mut pipe) = child.stdout.take() {
-                pipe.read_to_string(&mut stdout)?;
-            }
-            if let Some(mut pipe) = child.stderr.take() {
-                pipe.read_to_string(&mut stderr)?;
-            }
+            let (stdout, stderr) = join_pipe_readers(stdout_reader, stderr_reader)?;
             return Ok(CommandResult {
                 code: status.code(),
                 timed_out,
@@ -2598,6 +2668,35 @@ fn wait_child(child: &mut Child, timeout: Duration) -> Result<CommandResult> {
         }
         thread::sleep(Duration::from_millis(20));
     }
+}
+
+fn spawn_pipe_reader<R: Read + Send + 'static>(
+    mut pipe: R,
+) -> thread::JoinHandle<std::io::Result<String>> {
+    thread::spawn(move || {
+        let mut output = String::new();
+        pipe.read_to_string(&mut output)?;
+        Ok(output)
+    })
+}
+
+fn join_pipe_readers(
+    stdout: Option<thread::JoinHandle<std::io::Result<String>>>,
+    stderr: Option<thread::JoinHandle<std::io::Result<String>>>,
+) -> Result<(String, String)> {
+    let stdout = match stdout {
+        Some(reader) => reader
+            .join()
+            .map_err(|_| anyhow!("stdout reader thread panicked"))??,
+        None => String::new(),
+    };
+    let stderr = match stderr {
+        Some(reader) => reader
+            .join()
+            .map_err(|_| anyhow!("stderr reader thread panicked"))??,
+        None => String::new(),
+    };
+    Ok((stdout, stderr))
 }
 
 fn copy_project(source: &Path, destination: &Path) -> Result<()> {
@@ -2622,12 +2721,73 @@ fn copy_project(source: &Path, destination: &Path) -> Result<()> {
     Ok(())
 }
 
-fn scratch_dir(id: &str) -> PathBuf {
-    let stamp = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos();
-    std::env::temp_dir().join(format!("rust-mutant-scratch-{}-{stamp}", id))
+struct ScratchCleanupGuard {
+    root: PathBuf,
+}
+
+impl ScratchCleanupGuard {
+    fn new(project: &Path) -> Result<Self> {
+        let root = worker_scratch_root(project);
+        if root.exists() {
+            fs::remove_dir_all(&root)
+                .with_context(|| format!("clean stale scratch root {}", root.display()))?;
+        }
+        Ok(Self { root })
+    }
+}
+
+impl Drop for ScratchCleanupGuard {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.root);
+    }
+}
+
+struct SourceRestoreGuard {
+    pristine: PathBuf,
+    target: PathBuf,
+}
+
+impl SourceRestoreGuard {
+    fn new(pristine: PathBuf, target: PathBuf) -> Self {
+        Self { pristine, target }
+    }
+
+    fn restore(&self) -> Result<()> {
+        if let Some(parent) = self.target.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        fs::copy(&self.pristine, &self.target)
+            .with_context(|| format!("restore scratch source {}", self.target.display()))?;
+        Ok(())
+    }
+}
+
+impl Drop for SourceRestoreGuard {
+    fn drop(&mut self) {
+        let _ = self.restore();
+    }
+}
+
+fn worker_scratch_root(project: &Path) -> PathBuf {
+    std::env::temp_dir().join(format!(
+        "rust-mutant-scratch-{:016x}",
+        stable_path_hash(project)
+    ))
+}
+
+fn worker_scratch_dir(project: &Path, worker: usize) -> PathBuf {
+    worker_scratch_root(project).join(format!("worker-{worker}"))
+}
+
+fn restore_source_file(project: &Path, scratch: &Path, relative: &str) -> Result<()> {
+    let source = project.join(relative);
+    let target = scratch.join(relative);
+    if let Some(parent) = target.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    fs::copy(&source, &target)
+        .with_context(|| format!("restore scratch source {}", target.display()))?;
+    Ok(())
 }
 
 fn external_target_dir(project: &Path) -> PathBuf {
@@ -2680,6 +2840,9 @@ fn stable_diagnostic(value: &str) -> String {
     let mut compile_errors = Vec::new();
     for line in result.lines() {
         let mut line = line.to_string();
+        if line.contains("waiting for file lock on ") {
+            continue;
+        }
         if let Some(start) = line.find("finished in ") {
             let duration_start = start + "finished in ".len();
             if let Some(end_offset) = line[duration_start..].find('s') {
@@ -2693,6 +2856,26 @@ fn stable_diagnostic(value: &str) -> String {
             let duration_start = start + "Summary [".len();
             let end = duration_start + end_offset;
             line.replace_range(duration_start..end, "duration");
+        }
+        if let Some(start) = line.find("Nextest run ID ") {
+            let id_start = start + "Nextest run ID ".len();
+            let id_end = line[id_start..]
+                .find(char::is_whitespace)
+                .map_or(line.len(), |offset| id_start + offset);
+            line.replace_range(id_start..id_end, "id");
+        }
+        if line.contains("Finished ")
+            && let Some(start) = line.rfind(" in ")
+        {
+            let duration_start = start + " in ".len();
+            if line[duration_start..].ends_with('s') {
+                line.replace_range(duration_start.., "duration");
+            }
+        }
+        if let Some(start) = line.find("[   ")
+            && let Some(end_offset) = line[start..].find("s]")
+        {
+            line.replace_range(start..start + end_offset + 2, "[duration]");
         }
         if line.starts_with("error: could not compile") {
             compile_errors.push(line);
@@ -2811,6 +2994,88 @@ mod tests {
     }
 
     #[test]
+    fn multi_mutant_selector_preserves_order_and_rejects_missing_ids() {
+        let mutants = vec![bare_mutant("m0002-second"), bare_mutant("m0001-first")];
+        let ids = BTreeSet::from(["m0002-second".to_string(), "m0001-first".to_string()]);
+        let selected = select_mutants(mutants.clone(), None, Some(&ids)).unwrap();
+        assert_eq!(
+            selected
+                .iter()
+                .map(|mutant| mutant.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["m0002-second", "m0001-first"]
+        );
+        assert!(select_mutants(mutants.clone(), Some("1"), Some(&ids)).is_err());
+
+        let missing = BTreeSet::from(["m9999-missing".to_string()]);
+        assert!(select_mutants(mutants, None, Some(&missing)).is_err());
+    }
+
+    #[test]
+    fn numeric_mutant_selectors_match_discovery_indices() {
+        let mutants = vec![bare_mutant("m0001-first"), bare_mutant("m0002-second")];
+
+        let selected = select_mutants(
+            mutants.clone(),
+            None,
+            Some(&BTreeSet::from(["1".to_string(), "m0002".to_string()])),
+        )
+        .unwrap();
+        assert_eq!(selected.len(), 2);
+
+        let selected = select_mutants(
+            mutants.clone(),
+            None,
+            Some(&BTreeSet::from(["0001".to_string()])),
+        )
+        .unwrap();
+        assert_eq!(selected[0].id, "m0001-first");
+
+        let selected = select_mutants(
+            mutants.clone(),
+            None,
+            Some(&BTreeSet::from(["1-first".to_string()])),
+        )
+        .unwrap();
+        assert_eq!(selected[0].id, "m0001-first");
+
+        let selected = select_mutants(mutants, Some("2"), None).unwrap();
+        assert_eq!(selected[0].id, "m0002-second");
+    }
+
+    fn bare_mutant(id: &str) -> Mutant {
+        Mutant {
+            id: id.into(),
+            file: "src/lib.rs".into(),
+            line: 1,
+            column: 1,
+            family: "ROR".into(),
+            subtype: "test".into(),
+            original: "==".into(),
+            replacement: "!=".into(),
+            start_byte: 0,
+            end_byte: 2,
+            source_line: String::new(),
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn wait_child_drains_large_pipes_without_deadlock() {
+        let mut command = Command::new("sh");
+        command
+            .arg("-c")
+            .arg("yes x | head -c 131072")
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        let mut child = command.spawn().unwrap();
+        let result = wait_child(&mut child, Duration::from_secs(5)).unwrap();
+
+        assert_eq!(result.code, Some(0));
+        assert!(result.stdout.len() >= 131_072);
+    }
+
+    #[test]
     fn discovery_is_deterministic_and_masks_comments() {
         let source = "pub fn f(a: i32, b: i32) -> bool { // + &&\n a > b && a < b\n}";
         let masked = mask_non_code(source.as_bytes());
@@ -2824,6 +3089,11 @@ mod tests {
     fn ror_only_targets_binary_expression_operators() {
         let source = r#"
 struct ProbeEntry;
+
+struct ProbePlan {
+    drift: Vec<ProbeEntry>,
+    optional: Option<ProbeEntry>,
+}
 
 fn probe(left: usize, right: usize) {
     let _vec: Vec<ProbeEntry> = Vec::new();
@@ -2852,6 +3122,19 @@ fn probe(left: usize, right: usize) {
                 .map(|mutant| mutant.original.as_str())
                 .collect::<Vec<_>>(),
             vec!["<", ">", "<=", ">=", "==", "!="]
+        );
+        assert_eq!(
+            ror.iter()
+                .map(|mutant| (mutant.original.as_str(), mutant.replacement.as_str()))
+                .collect::<Vec<_>>(),
+            vec![
+                ("<", ">"),
+                (">", "<"),
+                ("<=", ">"),
+                (">=", "<"),
+                ("==", "!="),
+                ("!=", "=="),
+            ]
         );
         assert!(ror.iter().all(|mutant| mutant.source_line.contains("left")));
     }

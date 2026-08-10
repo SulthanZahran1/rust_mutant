@@ -39,9 +39,34 @@ fn help_lists_frozen_contract_surface() {
         "--no-tce",
         "--threshold",
         "--config",
+        "--mutants-file",
     ] {
         assert!(help.contains(item), "help omitted {item}: {help}");
     }
+}
+
+#[test]
+fn mutually_exclusive_mutant_selectors_have_contract_exit_two() {
+    let manifest = report_dir("mutants-file").join("missing-ids.txt");
+    let _ = fs::remove_file(&manifest);
+    let output = run(&[
+        "--path",
+        fixture("tce").to_str().unwrap(),
+        "--mutant",
+        "1",
+        "--mutants-file",
+        manifest.to_str().unwrap(),
+        "--dry-run",
+    ]);
+    let _ = fs::remove_file(&manifest);
+    assert_eq!(
+        output.status.code(),
+        Some(2),
+        "stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(String::from_utf8_lossy(&output.stderr).contains("mutually exclusive"));
 }
 
 #[test]
@@ -154,7 +179,7 @@ fn ror_ignores_generic_type_delimiters() {
     assert_eq!(mutants[0]["original"], "<");
     assert_eq!(mutants[0]["replacement"], ">");
     assert_eq!(mutants[0]["file"], "src/lib.rs");
-    assert_eq!(mutants[0]["line"], 9);
+    assert_eq!(mutants[0]["line"], 10);
     assert_eq!(mutants[0]["column"], 10);
 }
 

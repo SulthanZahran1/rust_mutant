@@ -80,6 +80,7 @@ The root object contains at least:
 --list-operators
 --operators <CSV>
 --mutant <ID>
+--mutants-file <FILE>
 --parallel <N>
 --timeout <DURATION>
 --incremental
@@ -101,7 +102,7 @@ Defaults:
 - routing and cache enabled once M3 exists
 - TCE enabled automatically after survivors
 
-`--mutant` accepts a stable mutant id. A numeric discovery index may be supported as a convenience alias. `--incremental` requires `--base-ref`. `--dry-run` performs discovery only and never runs the baseline or mutants. Post-survival LLVM-IR equivalence analysis is enabled by default in M4; `--no-tce` disables it for the run.
+`--mutant` accepts one stable mutant ID or one-based discovery-index alias. `--mutants-file` accepts one stable ID or one-based alias per non-empty, non-comment line and runs the selected mutants in discovery order. The two selectors are mutually exclusive; missing IDs fail closed. Accepted numeric aliases include `1`, `0001`, and `m0001`. `--incremental` requires `--base-ref`. `--dry-run` performs discovery only and never runs the baseline or mutants. Post-survival LLVM-IR equivalence analysis is enabled by default in M4; `--no-tce` disables it for the run.
 
 ## Global resource governor
 
