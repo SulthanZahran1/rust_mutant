@@ -1166,8 +1166,17 @@ fn stable_id(m: &Mutant) -> String {
     format!("{hash:016x}")
 }
 
-fn mutant_id_matches(discovered: &str, requested: &str) -> bool {
+fn numeric_mutant_index(requested: &str) -> Option<usize> {
+    let digits = requested.strip_prefix('m').unwrap_or(requested);
+    if digits.is_empty() || !digits.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    digits.parse().ok()
+}
+
+fn mutant_id_matches(discovered: &str, discovery_index: usize, requested: &str) -> bool {
     discovered == requested
+        || numeric_mutant_index(requested) == Some(discovery_index)
         || discovered.trim_start_matches('m').trim_start_matches('0') == requested
 }
 
@@ -1183,9 +1192,9 @@ fn select_mutants(
         let missing = ids
             .iter()
             .filter(|requested| {
-                !mutants
-                    .iter()
-                    .any(|candidate| mutant_id_matches(&candidate.id, requested))
+                !mutants.iter().enumerate().any(|(index, candidate)| {
+                    mutant_id_matches(&candidate.id, index + 1, requested)
+                })
             })
             .cloned()
             .collect::<Vec<_>>();
@@ -1195,12 +1204,22 @@ fn select_mutants(
                 missing.join(", ")
             );
         }
-        mutants.retain(|candidate| {
-            ids.iter()
-                .any(|requested| mutant_id_matches(&candidate.id, requested))
-        });
+        mutants = mutants
+            .into_iter()
+            .enumerate()
+            .filter(|(index, candidate)| {
+                ids.iter()
+                    .any(|requested| mutant_id_matches(&candidate.id, index + 1, requested))
+            })
+            .map(|(_, mutant)| mutant)
+            .collect();
     } else if let Some(requested) = mutant {
-        mutants.retain(|candidate| mutant_id_matches(&candidate.id, requested));
+        mutants = mutants
+            .into_iter()
+            .enumerate()
+            .filter(|(index, candidate)| mutant_id_matches(&candidate.id, index + 1, requested))
+            .map(|(_, mutant)| mutant)
+            .collect();
     }
     Ok(mutants)
 }
@@ -2527,6 +2546,8 @@ fn cargo_test(
     command
         .current_dir(cwd)
         .arg("test")
+        .arg("--jobs")
+        .arg("1")
         .arg("--manifest-path")
         .arg(manifest)
         .arg("--target-dir")
@@ -2538,7 +2559,10 @@ fn cargo_test(
         command.arg(filter);
     }
     let command_text = format!("cargo test --manifest-path {}", manifest.display());
-    command.stdout(Stdio::piped()).stderr(Stdio::piped());
+    command
+        .env("CARGO_BUILD_JOBS", "1")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
     let mut child = command
         .spawn()
         .with_context(|| format!("spawn cargo test in {}", cwd.display()))?;
@@ -2561,6 +2585,10 @@ fn cargo_nextest(
         .current_dir(cwd)
         .arg("nextest")
         .arg("run")
+        .arg("--build-jobs")
+        .arg("1")
+        .arg("--test-threads")
+        .arg("1")
         .arg("--manifest-path")
         .arg(manifest)
         .arg("--target-dir")
@@ -2575,7 +2603,10 @@ fn cargo_nextest(
         command.arg("--test").arg(&test.binary).arg(&test.name);
         command_text.push_str(&format!(" --test {} {}", test.binary, test.name));
     }
-    command.stdout(Stdio::piped()).stderr(Stdio::piped());
+    command
+        .env("CARGO_BUILD_JOBS", "1")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
     let mut child = command
         .spawn()
         .with_context(|| format!("spawn cargo nextest in {}", cwd.display()))?;
@@ -2974,6 +3005,30 @@ mod tests {
 
         let missing = BTreeSet::from(["m9999-missing".to_string()]);
         assert!(select_mutants(mutants, None, Some(&missing)).is_err());
+    }
+
+    #[test]
+    fn numeric_mutant_selectors_match_discovery_indices() {
+        let mutants = vec![bare_mutant("m0001-first"), bare_mutant("m0002-second")];
+
+        let selected = select_mutants(
+            mutants.clone(),
+            None,
+            Some(&BTreeSet::from(["1".to_string(), "m0002".to_string()])),
+        )
+        .unwrap();
+        assert_eq!(selected.len(), 2);
+
+        let selected = select_mutants(
+            mutants.clone(),
+            None,
+            Some(&BTreeSet::from(["0001".to_string()])),
+        )
+        .unwrap();
+        assert_eq!(selected[0].id, "m0001-first");
+
+        let selected = select_mutants(mutants, Some("2"), None).unwrap();
+        assert_eq!(selected[0].id, "m0002-second");
     }
 
     fn bare_mutant(id: &str) -> Mutant {

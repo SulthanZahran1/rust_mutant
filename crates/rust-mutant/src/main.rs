@@ -39,9 +39,10 @@ struct Cli {
     list_operators: bool,
     #[arg(long)]
     operators: Option<String>,
+    /// Stable mutant ID or one-based discovery index.
     #[arg(long)]
     mutant: Option<String>,
-    /// File containing one mutant ID per line. Runs all listed mutants in one process.
+    /// File containing one stable mutant ID or one-based discovery index per line. Runs all listed mutants in one process.
     #[arg(long)]
     mutants_file: Option<PathBuf>,
     #[arg(long, value_parser = parse_duration)]
