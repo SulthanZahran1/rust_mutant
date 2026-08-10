@@ -1,6 +1,6 @@
 # rust_mutant release roadmap
 
-> **Status:** planning. Milestone documents are drafts until the human locks each one.
+> **Status:** ✅ implementation complete and signed-off. GOAL-1 through GOAL-4 are complete; this file remains the roadmap index while the Wayfinder map tracks post-map maintenance.
 > **Destination:** rust_mutant 1.0.0, a stable Rust mutation-testing tool with the locked 18-family operator contract, measured fixture gates, per-test routing, TCE, machine-readable reports, and a release/distribution path.
 
 ## Milestones
@@ -26,9 +26,9 @@
 - [TCE feasibility](docs/research/tce.md)
 - [Benchmark measurements](docs/research/benchmarks.md)
 
-## Pending draft amendments
+## Recorded contract decisions
 
-- **GOAL-4 TCE mode:** During milestone discussion, the human chose automatic post-survival LLVM-IR TCE by default, with `--no-tce` as the escape hatch. This supersedes the earlier opt-in wording in the provisional CLI/architecture notes and must be frozen with the final contract in M4.
+- **GOAL-4 TCE mode:** During milestone discussion, the human chose automatic post-survival LLVM-IR TCE by default, with `--no-tce` as the escape hatch. This superseded the earlier opt-in wording and is frozen in the signed-off CLI/architecture contract.
 
 ## Canonical fixture roles
 
