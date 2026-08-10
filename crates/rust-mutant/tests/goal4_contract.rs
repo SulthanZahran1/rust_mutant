@@ -39,6 +39,7 @@ fn help_lists_frozen_contract_surface() {
         "--no-tce",
         "--threshold",
         "--config",
+        "--mutants-file",
     ] {
         assert!(help.contains(item), "help omitted {item}: {help}");
     }

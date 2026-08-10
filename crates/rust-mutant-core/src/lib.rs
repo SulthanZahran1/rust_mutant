@@ -16,7 +16,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant};
 use std::{
     io::{Read, Write},
     thread,
@@ -214,6 +214,7 @@ pub struct RunOptions {
     pub threshold: Option<f64>,
     pub operators: Option<BTreeSet<String>>,
     pub mutant: Option<String>,
+    pub mutant_ids: Option<BTreeSet<String>>,
     pub dry_run: bool,
     pub requested_workers: usize,
     pub no_cache: bool,
@@ -233,6 +234,7 @@ impl Default for RunOptions {
             threshold: Some(80.0),
             operators: None,
             mutant: None,
+            mutant_ids: None,
             dry_run: false,
             requested_workers: 1,
             no_cache: false,
@@ -1164,6 +1166,45 @@ fn stable_id(m: &Mutant) -> String {
     format!("{hash:016x}")
 }
 
+fn mutant_id_matches(discovered: &str, requested: &str) -> bool {
+    discovered == requested
+        || discovered.trim_start_matches('m').trim_start_matches('0') == requested
+}
+
+fn select_mutants(
+    mut mutants: Vec<Mutant>,
+    mutant: Option<&str>,
+    mutant_ids: Option<&BTreeSet<String>>,
+) -> Result<Vec<Mutant>> {
+    if mutant.is_some() && mutant_ids.is_some() {
+        bail!("single and multi-mutant selectors are mutually exclusive");
+    }
+    if let Some(ids) = mutant_ids {
+        let missing = ids
+            .iter()
+            .filter(|requested| {
+                !mutants
+                    .iter()
+                    .any(|candidate| mutant_id_matches(&candidate.id, requested))
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        if !missing.is_empty() {
+            bail!(
+                "requested mutant IDs were not discovered: {}",
+                missing.join(", ")
+            );
+        }
+        mutants.retain(|candidate| {
+            ids.iter()
+                .any(|requested| mutant_id_matches(&candidate.id, requested))
+        });
+    } else if let Some(requested) = mutant {
+        mutants.retain(|candidate| mutant_id_matches(&candidate.id, requested));
+    }
+    Ok(mutants)
+}
+
 pub fn run(options: &RunOptions) -> Result<Report> {
     let started = Instant::now();
     let session = GlobalSession::acquire()?;
@@ -1174,6 +1215,7 @@ pub fn run(options: &RunOptions) -> Result<Report> {
     if !project.is_dir() {
         bail!("project path is not a directory: {}", project.display());
     }
+    let _scratch_cleanup = ScratchCleanupGuard::new(&project)?;
     let manifest = options
         .manifest
         .clone()
@@ -1187,11 +1229,11 @@ pub fn run(options: &RunOptions) -> Result<Report> {
         bail!("Cargo manifest does not exist: {}", manifest.display());
     }
     let discovery_started = Instant::now();
-    let mut mutants = discover(&project, options.operators.as_ref())?;
-    if let Some(id) = &options.mutant {
-        mutants
-            .retain(|m| &m.id == id || m.id.trim_start_matches('m').trim_start_matches('0') == id);
-    }
+    let mutants = select_mutants(
+        discover(&project, options.operators.as_ref())?,
+        options.mutant.as_deref(),
+        options.mutant_ids.as_ref(),
+    )?;
     if options.dry_run {
         return Ok(report_for_discovery(
             &project,
@@ -1217,10 +1259,19 @@ pub fn run(options: &RunOptions) -> Result<Report> {
         fs::remove_dir_all(&target_dir)
             .with_context(|| format!("clean mutation target {}", target_dir.display()))?;
     }
+    let capacity = effective_cpu_capacity();
+    let global_cpu_budget = (capacity.saturating_mul(3) / 4).max(1);
+    let effective_workers = options.requested_workers.min(global_cpu_budget).max(1);
+    let memory_budget = memory_budget(options.max_memory_mib);
+    let baseline_target_dir = if effective_workers == 1 {
+        target_dir.join("worker-0")
+    } else {
+        target_dir.clone()
+    };
     let baseline = cargo_test(
         &project,
         &manifest,
-        &target_dir,
+        &baseline_target_dir,
         options.timeout.max(Duration::from_secs(10)),
         None,
     )?;
@@ -1254,10 +1305,6 @@ pub fn run(options: &RunOptions) -> Result<Report> {
     } else {
         options.timeout
     };
-    let capacity = effective_cpu_capacity();
-    let global_cpu_budget = (capacity.saturating_mul(3) / 4).max(1);
-    let effective_workers = options.requested_workers.min(global_cpu_budget).max(1);
-    let memory_budget = memory_budget(options.max_memory_mib);
     let rss_before = current_rss_mib();
     PEAK_RSS_MIB.store(rss_before, Ordering::Relaxed);
     let throttled_before = memory_budget.is_some_and(|budget| rss_before > budget);
@@ -1475,9 +1522,14 @@ fn execute_one(
         }
         return Ok(result);
     }
-    let scratch = scratch_dir(&mutant.id);
-    copy_project(project, &scratch)?;
+    let worker = rayon::current_thread_index().unwrap_or(0);
+    let scratch = worker_scratch_dir(project, worker);
+    if !scratch.exists() {
+        copy_project(project, &scratch)?;
+    }
     let target_file = scratch.join(&mutant.file);
+    restore_source_file(project, &scratch, &mutant.file)?;
+    let restore_guard = SourceRestoreGuard::new(project.join(&mutant.file), target_file.clone());
     let mut source = fs::read_to_string(&target_file)
         .with_context(|| format!("read scratch source {}", target_file.display()))?;
     if mutant.end_byte > source.len()
@@ -1485,7 +1537,6 @@ fn execute_one(
         || !source.is_char_boundary(mutant.end_byte)
         || source.get(mutant.start_byte..mutant.end_byte) != Some(mutant.original.as_str())
     {
-        let _ = fs::remove_dir_all(&scratch);
         bail!(
             "mutant {} no longer matches {}:{}",
             mutant.id,
@@ -1565,7 +1616,7 @@ fn execute_one(
         }
         tce = Some(result);
     }
-    let _ = fs::remove_dir_all(&scratch);
+    restore_guard.restore()?;
     let output = outputs.join("\n");
     let detail = match final_status {
         Status::Killed => Some(truncate(&stable_diagnostic(&output), 2000)),
@@ -2622,12 +2673,73 @@ fn copy_project(source: &Path, destination: &Path) -> Result<()> {
     Ok(())
 }
 
-fn scratch_dir(id: &str) -> PathBuf {
-    let stamp = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos();
-    std::env::temp_dir().join(format!("rust-mutant-scratch-{}-{stamp}", id))
+struct ScratchCleanupGuard {
+    root: PathBuf,
+}
+
+impl ScratchCleanupGuard {
+    fn new(project: &Path) -> Result<Self> {
+        let root = worker_scratch_root(project);
+        if root.exists() {
+            fs::remove_dir_all(&root)
+                .with_context(|| format!("clean stale scratch root {}", root.display()))?;
+        }
+        Ok(Self { root })
+    }
+}
+
+impl Drop for ScratchCleanupGuard {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.root);
+    }
+}
+
+struct SourceRestoreGuard {
+    pristine: PathBuf,
+    target: PathBuf,
+}
+
+impl SourceRestoreGuard {
+    fn new(pristine: PathBuf, target: PathBuf) -> Self {
+        Self { pristine, target }
+    }
+
+    fn restore(&self) -> Result<()> {
+        if let Some(parent) = self.target.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        fs::copy(&self.pristine, &self.target)
+            .with_context(|| format!("restore scratch source {}", self.target.display()))?;
+        Ok(())
+    }
+}
+
+impl Drop for SourceRestoreGuard {
+    fn drop(&mut self) {
+        let _ = self.restore();
+    }
+}
+
+fn worker_scratch_root(project: &Path) -> PathBuf {
+    std::env::temp_dir().join(format!(
+        "rust-mutant-scratch-{:016x}",
+        stable_path_hash(project)
+    ))
+}
+
+fn worker_scratch_dir(project: &Path, worker: usize) -> PathBuf {
+    worker_scratch_root(project).join(format!("worker-{worker}"))
+}
+
+fn restore_source_file(project: &Path, scratch: &Path, relative: &str) -> Result<()> {
+    let source = project.join(relative);
+    let target = scratch.join(relative);
+    if let Some(parent) = target.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    fs::copy(&source, &target)
+        .with_context(|| format!("restore scratch source {}", target.display()))?;
+    Ok(())
 }
 
 fn external_target_dir(project: &Path) -> PathBuf {
@@ -2693,6 +2805,26 @@ fn stable_diagnostic(value: &str) -> String {
             let duration_start = start + "Summary [".len();
             let end = duration_start + end_offset;
             line.replace_range(duration_start..end, "duration");
+        }
+        if let Some(start) = line.find("Nextest run ID ") {
+            let id_start = start + "Nextest run ID ".len();
+            let id_end = line[id_start..]
+                .find(char::is_whitespace)
+                .map_or(line.len(), |offset| id_start + offset);
+            line.replace_range(id_start..id_end, "id");
+        }
+        if line.contains("Finished ")
+            && let Some(start) = line.rfind(" in ")
+        {
+            let duration_start = start + " in ".len();
+            if line[duration_start..].ends_with('s') {
+                line.replace_range(duration_start.., "duration");
+            }
+        }
+        if let Some(start) = line.find("[   ")
+            && let Some(end_offset) = line[start..].find("s]")
+        {
+            line.replace_range(start..start + end_offset + 2, "[duration]");
         }
         if line.starts_with("error: could not compile") {
             compile_errors.push(line);
@@ -2808,6 +2940,39 @@ mod tests {
         assert_eq!(GENERIC_FAMILIES.len(), 10);
         assert_eq!(GENERIC_FAMILIES[9], "loop-inc-dec");
         assert_eq!(PUBLIC_FAMILIES.len(), 18);
+    }
+
+    #[test]
+    fn multi_mutant_selector_preserves_order_and_rejects_missing_ids() {
+        let mutants = vec![bare_mutant("m0001-first"), bare_mutant("m0002-second")];
+        let ids = BTreeSet::from(["m0002-second".to_string(), "m0001-first".to_string()]);
+        let selected = select_mutants(mutants.clone(), None, Some(&ids)).unwrap();
+        assert_eq!(
+            selected
+                .iter()
+                .map(|mutant| mutant.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["m0001-first", "m0002-second"]
+        );
+
+        let missing = BTreeSet::from(["m9999-missing".to_string()]);
+        assert!(select_mutants(mutants, None, Some(&missing)).is_err());
+    }
+
+    fn bare_mutant(id: &str) -> Mutant {
+        Mutant {
+            id: id.into(),
+            file: "src/lib.rs".into(),
+            line: 1,
+            column: 1,
+            family: "ROR".into(),
+            subtype: "test".into(),
+            original: "==".into(),
+            replacement: "!=".into(),
+            start_byte: 0,
+            end_byte: 2,
+            source_line: String::new(),
+        }
     }
 
     #[test]

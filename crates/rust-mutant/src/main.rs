@@ -4,6 +4,7 @@ use rust_mutant_core::{RunOptions, operator_families, run};
 use rust_mutant_report::{console, html, junit_xml, stryker_json};
 use serde::Deserialize;
 use std::collections::BTreeSet;
+use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::Duration;
@@ -40,6 +41,9 @@ struct Cli {
     operators: Option<String>,
     #[arg(long)]
     mutant: Option<String>,
+    /// File containing one mutant ID per line. Runs all listed mutants in one process.
+    #[arg(long)]
+    mutants_file: Option<PathBuf>,
     #[arg(long, value_parser = parse_duration)]
     timeout: Option<Duration>,
     #[arg(long)]
@@ -163,6 +167,14 @@ fn real_main() -> Result<u8> {
     if incremental && base_ref.is_none() {
         bail!("--incremental requires --base-ref <REF>");
     }
+    if cli.mutant.is_some() && cli.mutants_file.is_some() {
+        bail!("--mutant and --mutants-file are mutually exclusive");
+    }
+    let mutant_ids = cli
+        .mutants_file
+        .as_deref()
+        .map(read_mutant_ids)
+        .transpose()?;
     let options = RunOptions {
         project: project.clone(),
         manifest,
@@ -170,6 +182,7 @@ fn real_main() -> Result<u8> {
         threshold: Some(threshold),
         operators,
         mutant: cli.mutant,
+        mutant_ids,
         dry_run: cli.dry_run,
         requested_workers: cli.parallel.or(config.parallel).unwrap_or(1).max(1),
         no_cache: cli.no_cache || config.no_cache.unwrap_or(false),
@@ -283,6 +296,21 @@ fn parse_operators(value: &str) -> Result<BTreeSet<String>> {
         bail!("--operators requires at least one family");
     }
     Ok(result)
+}
+
+fn read_mutant_ids(path: &Path) -> Result<BTreeSet<String>> {
+    let text = fs::read_to_string(path)
+        .with_context(|| format!("read mutant manifest {}", path.display()))?;
+    let ids = text
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty() && !line.starts_with('#'))
+        .map(ToOwned::to_owned)
+        .collect::<BTreeSet<_>>();
+    if ids.is_empty() {
+        bail!("mutant manifest {} contains no IDs", path.display());
+    }
+    Ok(ids)
 }
 
 fn parse_duration(value: &str) -> Result<Duration, String> {
