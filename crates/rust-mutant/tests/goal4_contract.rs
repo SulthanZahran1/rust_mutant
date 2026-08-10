@@ -47,8 +47,8 @@ fn help_lists_frozen_contract_surface() {
 
 #[test]
 fn mutually_exclusive_mutant_selectors_have_contract_exit_two() {
-    let manifest = report_dir("mutants-file").join("ids.txt");
-    fs::write(&manifest, "1\n").expect("mutant manifest should be writable");
+    let manifest = report_dir("mutants-file").join("missing-ids.txt");
+    let _ = fs::remove_file(&manifest);
     let output = run(&[
         "--path",
         fixture("tce").to_str().unwrap(),
