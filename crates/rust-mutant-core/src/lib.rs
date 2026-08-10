@@ -2840,6 +2840,9 @@ fn stable_diagnostic(value: &str) -> String {
     let mut compile_errors = Vec::new();
     for line in result.lines() {
         let mut line = line.to_string();
+        if line.contains("waiting for file lock on ") {
+            continue;
+        }
         if let Some(start) = line.find("finished in ") {
             let duration_start = start + "finished in ".len();
             if let Some(end_offset) = line[duration_start..].find('s') {
@@ -2992,7 +2995,7 @@ mod tests {
 
     #[test]
     fn multi_mutant_selector_preserves_order_and_rejects_missing_ids() {
-        let mutants = vec![bare_mutant("m0001-first"), bare_mutant("m0002-second")];
+        let mutants = vec![bare_mutant("m0002-second"), bare_mutant("m0001-first")];
         let ids = BTreeSet::from(["m0002-second".to_string(), "m0001-first".to_string()]);
         let selected = select_mutants(mutants.clone(), None, Some(&ids)).unwrap();
         assert_eq!(
@@ -3000,8 +3003,9 @@ mod tests {
                 .iter()
                 .map(|mutant| mutant.id.as_str())
                 .collect::<Vec<_>>(),
-            vec!["m0001-first", "m0002-second"]
+            vec!["m0002-second", "m0001-first"]
         );
+        assert!(select_mutants(mutants.clone(), Some("1"), Some(&ids)).is_err());
 
         let missing = BTreeSet::from(["m9999-missing".to_string()]);
         assert!(select_mutants(mutants, None, Some(&missing)).is_err());
