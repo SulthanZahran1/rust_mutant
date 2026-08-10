@@ -1214,12 +1214,16 @@ fn select_mutants(
             .map(|(_, mutant)| mutant)
             .collect();
     } else if let Some(requested) = mutant {
-        mutants = mutants
+        let selected = mutants
             .into_iter()
             .enumerate()
             .filter(|(index, candidate)| mutant_id_matches(&candidate.id, index + 1, requested))
             .map(|(_, mutant)| mutant)
-            .collect();
+            .collect::<Vec<_>>();
+        if selected.is_empty() {
+            bail!("requested mutant ID was not discovered: {requested}");
+        }
+        mutants = selected;
     }
     Ok(mutants)
 }

@@ -70,6 +70,28 @@ fn mutually_exclusive_mutant_selectors_have_contract_exit_two() {
 }
 
 #[test]
+fn missing_single_mutant_id_fails_closed() {
+    let output = run(&[
+        "--path",
+        fixture("tce").to_str().unwrap(),
+        "--mutant",
+        "999999",
+        "--dry-run",
+    ]);
+    assert_eq!(
+        output.status.code(),
+        Some(2),
+        "stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stderr)
+            .contains("requested mutant ID was not discovered: 999999")
+    );
+}
+
+#[test]
 fn invalid_project_has_contract_exit_two() {
     let output = run(&[
         "--path",
