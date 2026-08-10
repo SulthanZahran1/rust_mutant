@@ -2599,17 +2599,12 @@ fn classify_command(command: &CommandResult) -> Status {
 fn wait_child(child: &mut Child, timeout: Duration) -> Result<CommandResult> {
     let start = Instant::now();
     let mut timed_out = false;
+    let stdout_reader = child.stdout.take().map(spawn_pipe_reader);
+    let stderr_reader = child.stderr.take().map(spawn_pipe_reader);
     loop {
         record_peak_rss();
         if let Some(status) = child.try_wait()? {
-            let mut stdout = String::new();
-            let mut stderr = String::new();
-            if let Some(mut pipe) = child.stdout.take() {
-                pipe.read_to_string(&mut stdout)?;
-            }
-            if let Some(mut pipe) = child.stderr.take() {
-                pipe.read_to_string(&mut stderr)?;
-            }
+            let (stdout, stderr) = join_pipe_readers(stdout_reader, stderr_reader)?;
             return Ok(CommandResult {
                 code: status.code(),
                 timed_out,
@@ -2630,14 +2625,7 @@ fn wait_child(child: &mut Child, timeout: Duration) -> Result<CommandResult> {
             }
             let _ = child.kill();
             let status = child.wait()?;
-            let mut stdout = String::new();
-            let mut stderr = String::new();
-            if let Some(mut pipe) = child.stdout.take() {
-                pipe.read_to_string(&mut stdout)?;
-            }
-            if let Some(mut pipe) = child.stderr.take() {
-                pipe.read_to_string(&mut stderr)?;
-            }
+            let (stdout, stderr) = join_pipe_readers(stdout_reader, stderr_reader)?;
             return Ok(CommandResult {
                 code: status.code(),
                 timed_out,
@@ -2649,6 +2637,35 @@ fn wait_child(child: &mut Child, timeout: Duration) -> Result<CommandResult> {
         }
         thread::sleep(Duration::from_millis(20));
     }
+}
+
+fn spawn_pipe_reader<R: Read + Send + 'static>(
+    mut pipe: R,
+) -> thread::JoinHandle<std::io::Result<String>> {
+    thread::spawn(move || {
+        let mut output = String::new();
+        pipe.read_to_string(&mut output)?;
+        Ok(output)
+    })
+}
+
+fn join_pipe_readers(
+    stdout: Option<thread::JoinHandle<std::io::Result<String>>>,
+    stderr: Option<thread::JoinHandle<std::io::Result<String>>>,
+) -> Result<(String, String)> {
+    let stdout = match stdout {
+        Some(reader) => reader
+            .join()
+            .map_err(|_| anyhow!("stdout reader thread panicked"))??,
+        None => String::new(),
+    };
+    let stderr = match stderr {
+        Some(reader) => reader
+            .join()
+            .map_err(|_| anyhow!("stderr reader thread panicked"))??,
+        None => String::new(),
+    };
+    Ok((stdout, stderr))
 }
 
 fn copy_project(source: &Path, destination: &Path) -> Result<()> {
@@ -2973,6 +2990,22 @@ mod tests {
             end_byte: 2,
             source_line: String::new(),
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn wait_child_drains_large_pipes_without_deadlock() {
+        let mut command = Command::new("sh");
+        command
+            .arg("-c")
+            .arg("yes x | head -c 131072")
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        let mut child = command.spawn().unwrap();
+        let result = wait_child(&mut child, Duration::from_secs(5)).unwrap();
+
+        assert_eq!(result.code, Some(0));
+        assert!(result.stdout.len() >= 131_072);
     }
 
     #[test]
