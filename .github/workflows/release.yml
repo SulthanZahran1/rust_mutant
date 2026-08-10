@@ -75,7 +75,8 @@ jobs:
           pattern: rust-mutant-*
           merge-multiple: true
       - name: Checksums
-        run: sha256sum dist/rust-mutant-* > dist/SHA256SUMS
+        working-directory: dist
+        run: sha256sum rust-mutant-* > SHA256SUMS
       - name: Publish GitHub release
         uses: softprops/action-gh-release@v2
         with:
