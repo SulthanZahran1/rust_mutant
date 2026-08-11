@@ -25,7 +25,7 @@ use tree_sitter::Parser;
 use walkdir::WalkDir;
 
 pub const SCHEMA_VERSION: u32 = 1;
-const CACHE_SCHEMA_VERSION: u32 = 3;
+const CACHE_SCHEMA_VERSION: u32 = 4;
 static PEAK_RSS_MIB: AtomicU64 = AtomicU64::new(0);
 pub const GENERIC_FAMILIES: [&str; 10] = [
     "AOR",
@@ -1336,7 +1336,7 @@ pub fn run(options: &RunOptions) -> Result<Report> {
     let rss_before = current_rss_mib();
     PEAK_RSS_MIB.store(rss_before, Ordering::Relaxed);
     let throttled_before = memory_budget.is_some_and(|budget| rss_before > budget);
-    let cache = CacheStore::new(&project);
+    let cache = CacheStore::new(&project)?;
     let cache_hits = AtomicUsize::new(0);
     let memory_wait_ms = AtomicU64::new(0);
     let execution_started = Instant::now();
@@ -1589,45 +1589,45 @@ fn execute_one(
         rayon::current_thread_index().unwrap_or(0)
     ));
     let scratch_manifest = scratch.join(manifest.file_name().unwrap_or_default());
-    let cases = if selected.is_empty() {
-        vec![None]
-    } else {
-        selected.iter().map(Some).collect::<Vec<_>>()
-    };
     let mut tests_run = Vec::new();
     let mut outputs = Vec::new();
+    let mut command_texts = Vec::new();
     let mut final_status = Status::Survived;
-    let mut command_text = String::new();
-    for case in cases {
-        let command = match case {
-            Some(test) => {
-                tests_run.push(test.label.clone());
-                cargo_nextest(
-                    &scratch,
-                    &scratch_manifest,
-                    &mutant_target_dir,
-                    timeout,
-                    Some(test),
-                )?
-            }
-            None => {
-                tests_run.push("full-suite".into());
-                cargo_nextest(
-                    &scratch,
-                    &scratch_manifest,
-                    &mutant_target_dir,
-                    timeout,
-                    None,
-                )?
-            }
-        };
-        command_text = command.command.clone();
+    let groups = grouped_test_cases(selected);
+    if groups.is_empty() {
+        tests_run.push("full-suite".into());
+        let command = cargo_nextest(
+            &scratch,
+            &scratch_manifest,
+            &mutant_target_dir,
+            timeout,
+            None,
+        )?;
+        command_texts.push(command.command.clone());
         outputs.push(command.output());
         final_status = classify_command(&command);
-        if final_status != Status::Survived {
-            break;
+    } else {
+        for group in groups {
+            let group_timeout = group_timeout(timeout, group.len());
+            let command = cargo_nextest(
+                &scratch,
+                &scratch_manifest,
+                &mutant_target_dir,
+                group_timeout,
+                Some(&group),
+            )?;
+            let output = stable_diagnostic(&command.output());
+            let status = classify_command(&command);
+            tests_run.extend(completed_test_labels(&group, &output));
+            command_texts.push(command.command.clone());
+            outputs.push(output);
+            final_status = status;
+            if final_status != Status::Survived {
+                break;
+            }
         }
     }
+    let command_text = command_texts.join("\n");
     let mut tce = None;
     if final_status == Status::Survived && options.tce {
         let tce_target = std::env::temp_dir().join("rust-mutant-tce").join(format!(
@@ -1791,17 +1791,33 @@ impl CachedOutcome {
 #[derive(Debug)]
 struct CacheStore {
     dir: PathBuf,
+    project_fingerprint: String,
     cache_ms: AtomicU64,
 }
 
 impl CacheStore {
-    fn new(project: &Path) -> Self {
-        Self {
+    fn new(project: &Path) -> Result<Self> {
+        let mut project_fingerprint = hash_file(&project.join("Cargo.toml"))?;
+        let lockfile = project.join("Cargo.lock");
+        if lockfile.is_file() {
+            project_fingerprint.push_str(&hash_file(&lockfile)?);
+        }
+        for entry in WalkDir::new(project.join("tests"))
+            .follow_links(false)
+            .into_iter()
+            .filter_map(Result::ok)
+        {
+            if entry.file_type().is_file() {
+                project_fingerprint.push_str(&hash_file(entry.path())?);
+            }
+        }
+        Ok(Self {
             dir: std::env::temp_dir()
                 .join("rust-mutant-cache")
                 .join(format!("{:016x}", stable_path_hash(project))),
+            project_fingerprint,
             cache_ms: AtomicU64::new(0),
-        }
+        })
     }
 
     fn key(
@@ -1827,20 +1843,7 @@ impl CacheStore {
             options.tce
         );
         value.push_str(&hash_file(&project.join(&mutant.file))?);
-        value.push_str(&hash_file(&project.join("Cargo.toml"))?);
-        let lockfile = project.join("Cargo.lock");
-        if lockfile.is_file() {
-            value.push_str(&hash_file(&lockfile)?);
-        }
-        for entry in WalkDir::new(project.join("tests"))
-            .follow_links(false)
-            .into_iter()
-            .filter_map(Result::ok)
-        {
-            if entry.file_type().is_file() {
-                value.push_str(&hash_file(entry.path())?);
-            }
-        }
+        value.push_str(&self.project_fingerprint);
         for test in tests {
             value.push_str(&test.label);
         }
@@ -2590,12 +2593,87 @@ fn cargo_test(
     Ok(result)
 }
 
+fn grouped_test_cases(selected: &[TestCase]) -> Vec<Vec<TestCase>> {
+    let mut groups = Vec::new();
+    for test in selected {
+        if let Some(group) = groups.iter_mut().find(|group: &&mut Vec<TestCase>| {
+            group
+                .first()
+                .is_some_and(|first| first.binary == test.binary)
+        }) {
+            group.push(test.clone());
+        } else {
+            groups.push(vec![test.clone()]);
+        }
+    }
+    groups
+}
+
+fn nextest_filterset(tests: &[TestCase]) -> String {
+    tests
+        .iter()
+        .map(|test| format!("test(={})", escape_nextest_matcher(&test.name)))
+        .collect::<Vec<_>>()
+        .join(" | ")
+}
+
+fn escape_nextest_matcher(value: &str) -> String {
+    value
+        .replace('\\', "\\\\")
+        .replace(')', "\\)")
+        .replace(',', "\\,")
+}
+
+fn completed_test_labels(tests: &[TestCase], output: &str) -> Vec<String> {
+    tests
+        .iter()
+        .filter(|test| {
+            output
+                .lines()
+                .any(|line| nextest_status_line_matches(line, test))
+        })
+        .map(|test| test.label.clone())
+        .collect()
+}
+
+fn nextest_status_line_matches(line: &str, test: &TestCase) -> bool {
+    if line.len() - line.trim_start().len() < 8 {
+        return false;
+    }
+    let tokens = line.split_whitespace().collect::<Vec<_>>();
+    if tokens.len() < 4
+        || !matches!(
+            tokens[0],
+            "PASS" | "FAIL" | "FLAKY" | "IGNORED" | "LEAK" | "SKIP" | "TIMEOUT"
+        )
+        || !tokens[1].starts_with('[')
+        || !tokens[1].ends_with(']')
+    {
+        return false;
+    }
+    let mut name_index = 2;
+    if tokens[name_index].starts_with('(') && tokens[name_index].ends_with(')') {
+        name_index += 1;
+    }
+    let Some(reporter) = tokens.get(name_index) else {
+        return false;
+    };
+    let Some((_, binary)) = reporter.rsplit_once("::") else {
+        return false;
+    };
+    binary == test.binary && tokens[name_index + 1..].join(" ") == test.name
+}
+
+fn group_timeout(timeout: Duration, test_count: usize) -> Duration {
+    timeout.saturating_mul(u32::try_from(test_count).unwrap_or(u32::MAX))
+}
+
 fn cargo_nextest(
     cwd: &Path,
     manifest: &Path,
     target_dir: &Path,
     timeout: Duration,
-    test: Option<&TestCase>,
+    tests: Option<&[TestCase]>,
 ) -> Result<CommandResult> {
     let mut command = Command::new("cargo");
     #[cfg(unix)]
@@ -2611,16 +2689,33 @@ fn cargo_nextest(
         .arg("--manifest-path")
         .arg(manifest)
         .arg("--target-dir")
-        .arg(target_dir)
-        .arg("--no-fail-fast")
-        .arg("--status-level")
-        .arg("fail")
-        .arg("--final-status-level")
-        .arg("none");
+        .arg(target_dir);
+    if tests.is_some() {
+        command
+            .arg("--fail-fast")
+            .arg("--status-level")
+            .arg("pass")
+            .arg("--final-status-level")
+            .arg("pass");
+    } else {
+        command
+            .arg("--no-fail-fast")
+            .arg("--status-level")
+            .arg("fail")
+            .arg("--final-status-level")
+            .arg("none");
+    }
     let mut command_text = String::from("cargo nextest run");
-    if let Some(test) = test {
-        command.arg("--test").arg(&test.binary).arg(&test.name);
-        command_text.push_str(&format!(" --test {} {}", test.binary, test.name));
+    if let Some(tests) = tests {
+        let binary = &tests[0].binary;
+        command.arg("--test").arg(binary);
+        let filterset = nextest_filterset(tests);
+        command.arg("--filterset").arg(&filterset);
+        command_text.push_str(&format!(
+            " --test {binary} --filterset '{filterset}' --fail-fast --status-level pass --final-status-level pass"
+        ));
+    } else {
+        command_text.push_str(" --no-fail-fast --status-level fail --final-status-level none");
     }
     command
         .env("CARGO_BUILD_JOBS", "1")
@@ -3060,6 +3155,63 @@ mod tests {
 
         let selected = select_mutants(mutants, Some("2"), None).unwrap();
         assert_eq!(selected[0].id, "m0002-second");
+    }
+
+    #[test]
+    fn routed_tests_group_by_binary_and_escape_filterset_matchers() {
+        let tests = vec![
+            test_case("alpha", "first"),
+            test_case("alpha", "name),with\\path"),
+            test_case("beta", "other"),
+        ];
+
+        let groups = grouped_test_cases(&tests);
+        assert_eq!(groups.len(), 2);
+        assert_eq!(groups[0].len(), 2);
+        assert_eq!(groups[1].len(), 1);
+        assert_eq!(
+            nextest_filterset(&groups[0]),
+            r"test(=first) | test(=name\)\,with\\path)"
+        );
+        let output = format!(
+            "        PASS [0.001s] (1/2) package::alpha first\n        FAIL [0.001s] (2/2) package::alpha {}\n",
+            groups[0][1].name
+        );
+        assert_eq!(
+            completed_test_labels(&groups[0], &output),
+            vec![groups[0][0].label.clone(), groups[0][1].label.clone()]
+        );
+        let collision_tests = vec![test_case("alpha", "foo"), test_case("alpha", "a::foo")];
+        let collision_output = "        FAIL [0.001s] (1/2) package::alpha a::foo\n";
+        assert_eq!(
+            completed_test_labels(&collision_tests, collision_output),
+            vec![collision_tests[1].label.clone()]
+        );
+        assert!(
+            completed_test_labels(&groups[0], "    PASS [0.001s] package::alpha first\n")
+                .is_empty()
+        );
+        assert!(completed_test_labels(&groups[1], "error: failed to compile").is_empty());
+    }
+
+    #[test]
+    fn grouped_timeout_scales_with_test_count() {
+        assert_eq!(
+            group_timeout(Duration::from_millis(250), 3),
+            Duration::from_millis(750)
+        );
+        assert_eq!(
+            group_timeout(Duration::from_secs(2), usize::MAX),
+            Duration::from_secs(2).saturating_mul(u32::MAX)
+        );
+    }
+
+    fn test_case(binary: &str, name: &str) -> TestCase {
+        TestCase {
+            binary: binary.into(),
+            name: name.into(),
+            label: format!("{binary}::{name}"),
+        }
     }
 
     fn bare_mutant(id: &str) -> Mutant {
