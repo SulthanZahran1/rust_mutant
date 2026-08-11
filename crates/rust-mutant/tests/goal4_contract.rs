@@ -27,6 +27,24 @@ fn report_dir(name: &str) -> PathBuf {
     path
 }
 
+fn routed_fixture(name: &str, tests: &str) -> PathBuf {
+    let path = report_dir(name);
+    fs::create_dir_all(path.join("src")).expect("source directory should be creatable");
+    fs::create_dir_all(path.join("tests")).expect("tests directory should be creatable");
+    fs::write(
+        path.join("Cargo.toml"),
+        "[package]\nname = \"rust-mutant-routed-fixture\"\nversion = \"0.1.0\"\nedition = \"2024\"\n\n[lib]\npath = \"src/lib.rs\"\n",
+    )
+    .expect("fixture manifest should be writable");
+    fs::write(
+        path.join("src/lib.rs"),
+        "pub fn predicate(x: i32) -> bool {\n    x > 0\n}\n",
+    )
+    .expect("fixture source should be writable");
+    fs::write(path.join("tests/smoke.rs"), tests).expect("fixture tests should be writable");
+    path
+}
+
 #[test]
 fn help_lists_frozen_contract_surface() {
     let output = run(&["--help"]);
@@ -237,6 +255,135 @@ fn repeated_json_runs_match_outside_timing() {
         }
     }
     assert_eq!(first, second);
+}
+
+#[test]
+fn routed_cli_wires_grouped_fail_fast_and_timeout_budget() {
+    let failing_project = routed_fixture(
+        "routed-failing-group",
+        r#"use rust_mutant_routed_fixture::predicate;
+
+#[test]
+fn case_one() {
+    assert!(predicate(1));
+    assert!(!predicate(0));
+}
+
+#[test]
+fn case_two() {
+    assert!(predicate(1));
+    assert!(!predicate(0));
+}
+
+#[test]
+fn case_three() {
+    assert!(predicate(1));
+    assert!(!predicate(0));
+}
+"#,
+    );
+    let output = run(&[
+        "--path",
+        failing_project.to_str().unwrap(),
+        "--operators",
+        "ROR",
+        "--mutant",
+        "m0001-ce45892cbdd94178",
+        "--timeout",
+        "10s",
+        "--format",
+        "json",
+        "--no-tce",
+        "--no-cache",
+    ]);
+    let _ = fs::remove_dir_all(&failing_project);
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let mutant = &report["mutants"][0];
+    assert_eq!(mutant["status"], "killed");
+    assert_eq!(mutant["testsRun"].as_array().unwrap().len(), 1);
+    assert_eq!(mutant["testsRun"][0], "smoke::case_one");
+    let command = mutant["command"].as_str().unwrap();
+    for fragment in [
+        "--filterset",
+        "test(=case_one)",
+        "test(=case_two)",
+        "test(=case_three)",
+        "--fail-fast",
+        "--status-level pass",
+        "--final-status-level pass",
+    ] {
+        assert!(
+            command.contains(fragment),
+            "command omitted {fragment}: {command}"
+        );
+    }
+    assert_eq!(report["summary"]["timeout"], 0);
+    assert!(
+        mutant["details"]
+            .as_str()
+            .unwrap()
+            .contains("Cancelling due to test failure")
+    );
+
+    let timeout_project = routed_fixture(
+        "routed-timeout-group",
+        r#"use rust_mutant_routed_fixture::predicate;
+use std::thread;
+use std::time::Duration;
+
+#[test]
+fn case_one() {
+    thread::sleep(Duration::from_millis(500));
+    let _ = predicate(1);
+}
+
+#[test]
+fn case_two() {
+    thread::sleep(Duration::from_millis(500));
+    let _ = predicate(1);
+}
+
+#[test]
+fn case_three() {
+    thread::sleep(Duration::from_millis(500));
+    let _ = predicate(1);
+}
+"#,
+    );
+    let output = run(&[
+        "--path",
+        timeout_project.to_str().unwrap(),
+        "--operators",
+        "ROR",
+        "--mutant",
+        "m0001-ce45892cbdd94178",
+        "--timeout",
+        "1s",
+        "--format",
+        "json",
+        "--no-tce",
+        "--no-cache",
+    ]);
+    let _ = fs::remove_dir_all(&timeout_project);
+    assert_eq!(
+        output.status.code(),
+        Some(1),
+        "stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let mutant = &report["mutants"][0];
+    assert_eq!(mutant["status"], "survived");
+    assert_eq!(mutant["testsRun"].as_array().unwrap().len(), 3);
+    assert_eq!(report["summary"]["timeout"], 0);
 }
 
 #[test]
