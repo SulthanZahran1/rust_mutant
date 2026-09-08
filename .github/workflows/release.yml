@@ -100,6 +100,16 @@ jobs:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
         run: |
           set -euo pipefail
+          # The version comes from the tag (v1.2.3 -> 1.2.3), never a
+          # hardcoded literal: a release tag that does not match the
+          # workspace version fails closed instead of publishing stale
+          # versions.
+          TAG_VERSION="${GITHUB_REF_NAME#v}"
+          WORKSPACE_VERSION="$(grep -m1 '^version = ' Cargo.toml | sed 's/version = "\(.*\)"/\1/')"
+          if [ "$TAG_VERSION" != "$WORKSPACE_VERSION" ]; then
+            echo "tag version $TAG_VERSION does not match workspace version $WORKSPACE_VERSION" >&2
+            exit 1
+          fi
           wait_for_crate() {
             local crate="$1"
             local version="$2"
@@ -113,11 +123,11 @@ jobs:
             return 1
           }
           cargo publish --locked -p rust-mutant-tce
-          wait_for_crate rust-mutant-tce 1.0.0
+          wait_for_crate rust-mutant-tce "$TAG_VERSION"
           cargo publish --locked -p rust-mutant-core
-          wait_for_crate rust-mutant-core 1.0.0
+          wait_for_crate rust-mutant-core "$TAG_VERSION"
           cargo publish --locked -p rust-mutant-runner
-          wait_for_crate rust-mutant-runner 1.0.0
+          wait_for_crate rust-mutant-runner "$TAG_VERSION"
           cargo publish --locked -p rust-mutant-report
-          wait_for_crate rust-mutant-report 1.0.0
+          wait_for_crate rust-mutant-report "$TAG_VERSION"
           cargo publish --locked -p rust-mutant
