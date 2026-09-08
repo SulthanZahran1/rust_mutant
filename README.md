@@ -47,6 +47,14 @@ mutants are reported separately and are excluded from MSI. TCE compilation
 errors are visible in the mutant record and never become false equivalent
 classifications.
 
+## Transient artifacts
+
+A run's build and TCE scratch directories live under the system temp
+directory and are removed when the run exits — success or failure — so a
+campaign leaves no build artifacts behind. Use `--keep-temp` to keep them
+for debugging. The content-addressed cache is never removed by a run; it is
+the warm-campaign store.
+
 ## Operator families
 
 The 18 public families are:

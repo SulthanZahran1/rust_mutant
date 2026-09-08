@@ -7,4 +7,4 @@ description.workspace = true
 repository.workspace = true
 
 [dependencies]
-rust-mutant-core = { path = "../rust-mutant-core", version = "1.0.0" }
+rust-mutant-core = { path = "../rust-mutant-core", version = "1.0.1" }

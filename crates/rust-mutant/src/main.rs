@@ -61,6 +61,10 @@ struct Cli {
     no_routing: bool,
     #[arg(long)]
     no_cache: bool,
+    /// Keep the run's build and TCE scratch directories after the run
+    /// (default: removed on exit, success or failure).
+    #[arg(long)]
+    keep_temp: bool,
     #[arg(long)]
     max_memory: Option<u64>,
 }
@@ -192,6 +196,7 @@ fn real_main() -> Result<u8> {
         base_ref,
         max_memory_mib: cli.max_memory.or(config.max_memory),
         tce: !(cli.no_tce || config.no_tce.unwrap_or(false)),
+        keep_temp: cli.keep_temp,
     };
     let report = run(&options)?;
     render(&report, format, output.as_deref(), &project, cli.quiet)?;

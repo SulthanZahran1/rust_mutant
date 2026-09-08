@@ -15,4 +15,4 @@ tree-sitter-rust.workspace = true
 walkdir.workspace = true
 libc.workspace = true
 rayon.workspace = true
-rust-mutant-tce = { path = "../rust-mutant-tce", version = "1.0.0" }
+rust-mutant-tce = { path = "../rust-mutant-tce", version = "1.0.1" }

@@ -223,6 +223,10 @@ pub struct RunOptions {
     pub base_ref: Option<String>,
     pub max_memory_mib: Option<u64>,
     pub tce: bool,
+    /// Keep the per-run build and TCE scratch directories after the run
+    /// (Stryker's `cleanTempDir: false`). Default false: the run's own
+    /// artifacts are transient and removed on exit, success or failure.
+    pub keep_temp: bool,
 }
 
 impl Default for RunOptions {
@@ -243,6 +247,7 @@ impl Default for RunOptions {
             base_ref: None,
             max_memory_mib: None,
             tce: true,
+            keep_temp: false,
         }
     }
 }
@@ -1379,6 +1384,16 @@ pub fn run(options: &RunOptions) -> Result<Report> {
     let peak_rss = PEAK_RSS_MIB.load(Ordering::Relaxed).max(rss);
     let throttled = throttled_before || memory_budget.is_some_and(|budget| rss > budget);
     let wait_ms = session.wait_ms + u128::from(memory_wait_ms.load(Ordering::Relaxed));
+    // The run's own artifacts are transient: the scratch root is removed
+    // by ScratchCleanupGuard on drop, and the build target + TCE dirs are
+    // removed here unless --keep-temp. The global session lock is still
+    // held, so no other run can be using them; a crashed run's stale dirs
+    // are cleaned at the next run's start either way. The content-addressed
+    // cache dir is deliberately NOT removed — it is the warm-campaign store.
+    if !options.keep_temp {
+        let _ = fs::remove_dir_all(&target_dir);
+        let _ = fs::remove_dir_all(std::env::temp_dir().join("rust-mutant-tce"));
+    }
     drop(session);
     Ok(Report {
         schema_version: SCHEMA_VERSION,
