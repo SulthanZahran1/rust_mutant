@@ -40,6 +40,7 @@ fn help_lists_frozen_contract_surface() {
         "--threshold",
         "--config",
         "--mutants-file",
+        "--keep-temp",
     ] {
         assert!(help.contains(item), "help omitted {item}: {help}");
     }
@@ -139,6 +140,73 @@ fn threshold_failure_has_contract_exit_one() {
     assert_eq!(output.status.code(), Some(1));
     let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(report["summary"]["thresholdPassed"], false);
+}
+
+#[test]
+fn temp_dirs_are_removed_after_run_unless_keep_temp() {
+    let project = fixture("small").canonicalize().unwrap();
+    let target_root = std::env::temp_dir().join("rust-mutant-target");
+    let target_dir = target_root.join(format!("{:016x}", stable_path_hash(&project)));
+
+    // Default: the run's build artifacts are removed on exit.
+    let output = run(&[
+        "--path",
+        project.to_str().unwrap(),
+        "--format",
+        "json",
+        "--threshold",
+        "0",
+        "--no-tce",
+        "--no-routing",
+        "--no-cache",
+    ]);
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        !target_dir.exists(),
+        "target dir should be removed after a default run"
+    );
+
+    // --keep-temp: the artifacts survive for debugging.
+    let output = run(&[
+        "--path",
+        project.to_str().unwrap(),
+        "--format",
+        "json",
+        "--threshold",
+        "0",
+        "--no-tce",
+        "--no-routing",
+        "--no-cache",
+        "--keep-temp",
+    ]);
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        target_dir.exists(),
+        "target dir should survive with --keep-temp"
+    );
+    let _ = fs::remove_dir_all(&target_dir);
+}
+
+/// The FNV-1a 64-bit hash `rust-mutant-core` uses to name per-project
+/// scratch dirs (`stable_path_hash`). Kept in lockstep with the core
+/// implementation so the test can predict the exact directory name.
+fn stable_path_hash(path: &Path) -> u64 {
+    let mut h = 0xcbf29ce484222325u64;
+    for byte in path.to_string_lossy().bytes() {
+        h ^= u64::from(byte);
+        h = h.wrapping_mul(0x100000001b3);
+    }
+    h
 }
 
 #[test]

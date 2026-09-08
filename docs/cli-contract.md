@@ -89,6 +89,7 @@ The root object contains at least:
 --threshold <PERCENT>
 --no-routing
 --no-cache
+--keep-temp
 --max-memory <MiB>
 ```
 
@@ -103,6 +104,10 @@ Defaults:
 - TCE enabled automatically after survivors
 
 `--mutant` accepts one stable mutant ID or one-based discovery-index alias. `--mutants-file` accepts one stable ID or one-based alias per non-empty, non-comment line and runs the selected mutants in discovery order. The two selectors are mutually exclusive; missing IDs fail closed. Accepted numeric aliases include `1`, `0001`, and `m0001`. `--incremental` requires `--base-ref`. `--dry-run` performs discovery only and never runs the baseline or mutants. Post-survival LLVM-IR equivalence analysis is enabled by default in M4; `--no-tce` disables it for the run.
+
+### Transient artifacts
+
+The run's build target and TCE scratch directories live under the system temp directory and are **removed when the run exits** — success or failure — so a campaign leaves no build artifacts behind. `--keep-temp` keeps them for debugging (Stryker's `cleanTempDir: false`). The content-addressed cache directory is never removed by a run: it is the warm-campaign store and is only invalidated by its own fingerprint.
 
 ## Global resource governor
 
