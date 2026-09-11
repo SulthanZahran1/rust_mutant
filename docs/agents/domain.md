@@ -10,7 +10,7 @@
 - **MSI** — mutation score indicator: killed / (killed + survived), excluding not-covered and equivalent.
 - **TCE** — trivial compiler equivalence: compile a surviving mutant and compare normalized IR against the original; identical IR ⇒ provably equivalent, excluded from the MSI denominator.
 - **Schemata** — compile once with all mutants injected (Dart playbook) vs per-mutant compile (Go playbook via `-overlay`). Rust's equivalent mechanism is an open research question (cargo-mutants copies the tree and patches textually; per-mutant `cargo test` recompiles).
-- **sambungapi** — the dogfood corpus #1: MetatechID/sambungapi, a Rust (axum + rusqlite) wire-compatible Composio impostor for Bella. Its testing-tier map (MetatechID/sambungapi issues) is blocked by this map's completion.
+- **sambungapi** — the intended dogfood corpus #1: MetatechID/sambungapi, a Rust (axum + rusqlite) wire-compatible Composio impostor for Bella. The mutation gate was removed from sambungapi's normal flow on 2026-09-09 (PR #919); rust_mutant is standalone.
 
 ## Known constraints / facts from research
 
@@ -20,7 +20,7 @@
 - Rust has NO built-in per-test coverage attribution (Go has coverprofile, Dart has --coverage). The per-test routing research must find the mechanism (llvm-cov/grcov/nextest-based).
 - TCE for Rust: Dart compares kernel bytecode, Go compares normalized assembly. Rust candidates: MIR (rustc -Zdump-mir), LLVM IR (llvm-cov/llvm-dis), or assembly. Open research question.
 - Sibling licenses: dart-mutant MIT, gopher_mutant MIT. rust_mutant: MIT (locked).
-- The sambungapi map (MetatechID/sambungapi) has a ticket "mutation gate" blocked by this map's completion (cross-repo body convention).
+- The sambungapi map (MetatechID/sambungapi) previously had a ticket "mutation gate" blocked by this map's completion (cross-repo body convention); that gate was removed from sambungapi's normal flow on 2026-09-09 (PR #919) and this tool is now standalone.
 
 ## Privacy
 
