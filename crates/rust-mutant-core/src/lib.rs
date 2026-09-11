@@ -31,6 +31,7 @@ pub use rust_mutant_runner::{
 
 pub const SCHEMA_VERSION: u32 = 1;
 const CACHE_SCHEMA_VERSION: u32 = 4;
+const BASELINE_TIMEOUT_MS: u128 = ADAPTIVE_TIMEOUT_CEILING_MS;
 static PEAK_RSS_MIB: AtomicU64 = AtomicU64::new(0);
 pub const GENERIC_FAMILIES: [&str; 10] = [
     "AOR",
@@ -1238,6 +1239,20 @@ fn select_mutants(
     Ok(mutants)
 }
 
+/// Select the independent timeout for the baseline cargo test.
+///
+/// The adaptive timeout value is a two-second sentinel, not a real budget.
+/// The baseline runs against a fresh target directory and may need to compile
+/// the entire dependency graph, so adaptive mode gets the full ceiling. An
+/// explicit timeout keeps the existing ten-second minimum.
+fn baseline_timeout(options: &RunOptions) -> Duration {
+    if options.timeout == Duration::from_secs(2) {
+        Duration::from_millis(BASELINE_TIMEOUT_MS as u64)
+    } else {
+        options.timeout.max(Duration::from_secs(10))
+    }
+}
+
 pub fn run(options: &RunOptions) -> Result<Report> {
     let started = Instant::now();
     let session = GlobalSession::acquire()?;
@@ -1301,16 +1316,19 @@ pub fn run(options: &RunOptions) -> Result<Report> {
     } else {
         target_dir.clone()
     };
+    let baseline_budget = baseline_timeout(options);
     let baseline = cargo_test(
         &project,
         &manifest,
         &baseline_target_dir,
-        options.timeout.max(Duration::from_secs(10)),
+        baseline_budget,
         None,
     )?;
     if baseline.timed_out || baseline.code != Some(0) {
         bail!(
-            "baseline cargo test failed (exit {:?})\n{}",
+            "baseline cargo test failed (timeout budget {:?}, timed out: {}, exit {:?}); a cold build may exceed this budget\n{}",
+            baseline_budget,
+            baseline.timed_out,
             baseline.code,
             truncate(&baseline.stderr, 4000)
         );
@@ -3223,6 +3241,29 @@ mod tests {
     #[test]
     fn adaptive_timeout_respects_floor_for_tiny_baseline() {
         assert_eq!(adaptive_timeout(0), Duration::from_secs(5));
+    }
+
+    #[test]
+    fn baseline_timeout_uses_adaptive_ceiling_for_default_sentinel() {
+        assert_eq!(
+            baseline_timeout(&RunOptions::default()),
+            Duration::from_secs(300)
+        );
+    }
+
+    #[test]
+    fn baseline_timeout_enforces_ten_second_minimum_for_explicit_values() {
+        let options = RunOptions {
+            timeout: Duration::from_secs(5),
+            ..RunOptions::default()
+        };
+        assert_eq!(baseline_timeout(&options), Duration::from_secs(10));
+
+        let options = RunOptions {
+            timeout: Duration::from_secs(15),
+            ..RunOptions::default()
+        };
+        assert_eq!(baseline_timeout(&options), Duration::from_secs(15));
     }
 
     fn test_case(binary: &str, name: &str) -> TestCase {
