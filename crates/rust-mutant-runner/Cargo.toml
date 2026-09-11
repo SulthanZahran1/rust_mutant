@@ -7,6 +7,3 @@ description.workspace = true
 repository.workspace = true
 keywords.workspace = true
 categories.workspace = true
-
-[dependencies]
-rust-mutant-core = { path = "../rust-mutant-core", version = "1.0.1" }

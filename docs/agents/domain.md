@@ -12,6 +12,24 @@
 - **Schemata** — compile once with all mutants injected (Dart playbook) vs per-mutant compile (Go playbook via `-overlay`). Rust's equivalent mechanism is an open research question (cargo-mutants copies the tree and patches textually; per-mutant `cargo test` recompiles).
 - **sambungapi** — the intended dogfood corpus #1: MetatechID/sambungapi, a Rust (axum + rusqlite) wire-compatible Composio impostor for Bella. The mutation gate was removed from sambungapi's normal flow on 2026-09-09 (PR #919); rust_mutant is standalone.
 
+## Current crate boundary
+
+`rust-mutant-runner` is the published runner boundary for the first extracted
+execution primitives: it owns the pure adaptive timeout policy
+(`ADAPTIVE_TIMEOUT_MULTIPLIER`, `ADAPTIVE_TIMEOUT_FLOOR_MS`,
+`ADAPTIVE_TIMEOUT_CEILING_MS`, `adaptive_timeout`) and the `group_timeout`
+scaling for routed test groups. `rust-mutant-core` re-exports all of them so
+existing callers keep the same surface. Test-case grouping
+(`grouped_test_cases`), coverage routing, process execution, caching, the
+resource governor, and per-mutant orchestration remain in core; grouping uses
+core's private `TestCase` type, so moving it would create a core/runner type
+dependency rather than a self-contained boundary.
+
+The adaptive timeout is `baseline_ms × 3 + 5000 ms`, clamped to a 5-second
+floor and a 300-second ceiling. Routed groups scale that value by the number
+of covering tests but are capped at the same 300-second ceiling; an explicit
+`--timeout` is never clamped because it is an intentional user choice.
+
 ## Known constraints / facts from research
 
 - Landscape verified 2026-08-08 (gh api + web): cargo-mutants 1,246 stars, pushed 2026-07-06, MIT, v27.1.0 installed on the dev box; mutagen 642 stars, last pushed 2023-05-29, Apache-2.0, nightly-only proc-macro; mutantor is a proc-macro framework (not a CLI) with generic ops + SDL + IPVR/IPEX and AI-assisted planning, reports/parallel on its roadmap; mutest-rs is attribute-based.
