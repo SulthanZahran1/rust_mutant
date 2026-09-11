@@ -99,9 +99,19 @@ Defaults:
 - console output
 - threshold `80`
 - deterministic mutant ordering
-- adaptive timeout when available
+- adaptive timeout by default: baseline duration × 3, with a 5-second floor and a 300-second ceiling
 - routing and cache enabled once M3 exists
 - TCE enabled automatically after survivors
+
+### Timeout policy
+
+In adaptive mode (the default), each mutant timeout is `baseline_ms × 3 + 5000 ms`,
+clamped to a minimum of `5000 ms` (5 seconds) and a maximum of `300000 ms`
+(300 seconds). When coverage routing groups tests by binary, the per-mutant timeout
+is multiplied by the number of tests in each group, but the resulting group timeout
+is capped at 300 seconds. An explicit `--timeout` value is not clamped by the
+300-second ceiling; routed groups retain the existing multiplication of that
+user-selected timeout.
 
 `--mutant` accepts one stable mutant ID or one-based discovery-index alias. `--mutants-file` accepts one stable ID or one-based alias per non-empty, non-comment line and runs the selected mutants in discovery order. The two selectors are mutually exclusive; missing IDs fail closed. Accepted numeric aliases include `1`, `0001`, and `m0001`. `--incremental` requires `--base-ref`. `--dry-run` performs discovery only and never runs the baseline or mutants. Post-survival LLVM-IR equivalence analysis is enabled by default in M4; `--no-tce` disables it for the run.
 

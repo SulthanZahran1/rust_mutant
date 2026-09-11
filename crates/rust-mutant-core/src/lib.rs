@@ -26,6 +26,11 @@ use walkdir::WalkDir;
 
 pub const SCHEMA_VERSION: u32 = 1;
 const CACHE_SCHEMA_VERSION: u32 = 4;
+/// Adaptive timeout policy: baseline duration × 3 plus a 5-second floor,
+/// clamped to a 300-second ceiling.
+const ADAPTIVE_TIMEOUT_COEFFICIENT: u128 = 3;
+const ADAPTIVE_TIMEOUT_FLOOR_MS: u128 = 5_000;
+const ADAPTIVE_TIMEOUT_CEILING_MS: u128 = 300_000;
 static PEAK_RSS_MIB: AtomicU64 = AtomicU64::new(0);
 pub const GENERIC_FAMILIES: [&str; 10] = [
     "AOR",
@@ -1325,11 +1330,7 @@ pub fn run(options: &RunOptions) -> Result<Report> {
     let routing_ms = discovery_started.elapsed().as_millis();
     let adaptive = options.timeout == Duration::from_secs(2);
     let mutant_timeout = if adaptive {
-        Duration::from_millis(
-            (baseline.duration_ms.saturating_mul(3) + 5000)
-                .max(5000)
-                .min(u64::MAX as u128) as u64,
-        )
+        adaptive_timeout(baseline.duration_ms)
     } else {
         options.timeout
     };
@@ -1608,7 +1609,11 @@ fn execute_one(
         final_status = classify_command(&command);
     } else {
         for group in groups {
-            let group_timeout = group_timeout(timeout, group.len());
+            let group_timeout = group_timeout(
+                timeout,
+                group.len(),
+                options.timeout == Duration::from_secs(2),
+            );
             let command = cargo_nextest(
                 &scratch,
                 &scratch_manifest,
@@ -2664,8 +2669,24 @@ fn nextest_status_line_matches(line: &str, test: &TestCase) -> bool {
     binary == test.binary && tokens[name_index + 1..].join(" ") == test.name
 }
 
-fn group_timeout(timeout: Duration, test_count: usize) -> Duration {
-    timeout.saturating_mul(u32::try_from(test_count).unwrap_or(u32::MAX))
+fn adaptive_timeout(baseline_duration_ms: u128) -> Duration {
+    let timeout_ms = baseline_duration_ms
+        .saturating_mul(ADAPTIVE_TIMEOUT_COEFFICIENT)
+        .saturating_add(ADAPTIVE_TIMEOUT_FLOOR_MS)
+        .clamp(ADAPTIVE_TIMEOUT_FLOOR_MS, ADAPTIVE_TIMEOUT_CEILING_MS);
+    Duration::from_millis(timeout_ms as u64)
+}
+
+/// Scale routed groups in adaptive mode without allowing a group invocation to
+/// exceed the adaptive ceiling. Explicit `--timeout` values remain uncapped:
+/// they are an intentional user choice and retain the existing multiplication.
+fn group_timeout(timeout: Duration, test_count: usize, adaptive: bool) -> Duration {
+    let scaled = timeout.saturating_mul(u32::try_from(test_count).unwrap_or(u32::MAX));
+    if adaptive {
+        scaled.min(Duration::from_millis(ADAPTIVE_TIMEOUT_CEILING_MS as u64))
+    } else {
+        scaled
+    }
 }
 
 fn cargo_nextest(
@@ -3197,13 +3218,31 @@ mod tests {
     #[test]
     fn grouped_timeout_scales_with_test_count() {
         assert_eq!(
-            group_timeout(Duration::from_millis(250), 3),
+            group_timeout(Duration::from_millis(250), 3, false),
             Duration::from_millis(750)
         );
         assert_eq!(
-            group_timeout(Duration::from_secs(2), usize::MAX),
+            group_timeout(Duration::from_secs(2), usize::MAX, false),
             Duration::from_secs(2).saturating_mul(u32::MAX)
         );
+    }
+
+    #[test]
+    fn adaptive_group_timeout_is_capped_at_ceiling() {
+        assert_eq!(
+            group_timeout(Duration::from_secs(200), 2, true),
+            Duration::from_secs(300)
+        );
+    }
+
+    #[test]
+    fn adaptive_timeout_respects_ceiling_for_slow_baseline() {
+        assert_eq!(adaptive_timeout(200_000), Duration::from_secs(300));
+    }
+
+    #[test]
+    fn adaptive_timeout_respects_floor_for_tiny_baseline() {
+        assert_eq!(adaptive_timeout(0), Duration::from_secs(5));
     }
 
     fn test_case(binary: &str, name: &str) -> TestCase {
