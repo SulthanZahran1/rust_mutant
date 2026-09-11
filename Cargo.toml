@@ -23,6 +23,8 @@ edition = "2024"
 license = "MIT"
 repository = "https://github.com/SulthanZahran1/rust_mutant"
 description = "AST-based mutation testing for Rust"
+keywords = ["mutation-testing", "testing", "tree-sitter", "mutation", "test-coverage"]
+categories = ["development-tools::testing", "command-line-utilities"]
 
 [workspace.dependencies]
 anyhow = "1"
