@@ -105,13 +105,18 @@ Defaults:
 
 ### Timeout policy
 
-In adaptive mode (the default), each mutant timeout is `baseline_ms × 3 + 5000 ms`,
+In adaptive mode (the default), the baseline `cargo test` has its own `300000 ms`
+(300-second) timeout budget, separate from the per-mutant adaptive timeout. The
+baseline runs against a fresh target directory, so it is a cold build that may
+need to compile the entire dependency graph before running tests.
+
+Each mutant timeout is `baseline_ms × 3 + 5000 ms`,
 clamped to a minimum of `5000 ms` (5 seconds) and a maximum of `300000 ms`
 (300 seconds). When coverage routing groups tests by binary, the per-mutant timeout
 is multiplied by the number of tests in each group, but the resulting group timeout
 is capped at 300 seconds. An explicit `--timeout` value is not clamped by the
-300-second ceiling; routed groups retain the existing multiplication of that
-user-selected timeout.
+300-second ceiling; it retains the existing ten-second minimum for the baseline,
+and routed groups retain the existing multiplication of that user-selected timeout.
 
 `--mutant` accepts one stable mutant ID or one-based discovery-index alias. `--mutants-file` accepts one stable ID or one-based alias per non-empty, non-comment line and runs the selected mutants in discovery order. The two selectors are mutually exclusive; missing IDs fail closed. Accepted numeric aliases include `1`, `0001`, and `m0001`. `--incremental` requires `--base-ref`. `--dry-run` performs discovery only and never runs the baseline or mutants. Post-survival LLVM-IR equivalence analysis is enabled by default in M4; `--no-tce` disables it for the run.
 
