@@ -24,13 +24,13 @@ use std::{
 use tree_sitter::Parser;
 use walkdir::WalkDir;
 
+pub use rust_mutant_runner::{
+    ADAPTIVE_TIMEOUT_CEILING_MS, ADAPTIVE_TIMEOUT_FLOOR_MS, ADAPTIVE_TIMEOUT_MULTIPLIER,
+    adaptive_timeout, group_timeout,
+};
+
 pub const SCHEMA_VERSION: u32 = 1;
 const CACHE_SCHEMA_VERSION: u32 = 4;
-/// Adaptive timeout policy: baseline duration × 3 plus a 5-second floor,
-/// clamped to a 300-second ceiling.
-const ADAPTIVE_TIMEOUT_COEFFICIENT: u128 = 3;
-const ADAPTIVE_TIMEOUT_FLOOR_MS: u128 = 5_000;
-const ADAPTIVE_TIMEOUT_CEILING_MS: u128 = 300_000;
 static PEAK_RSS_MIB: AtomicU64 = AtomicU64::new(0);
 pub const GENERIC_FAMILIES: [&str; 10] = [
     "AOR",
@@ -2667,26 +2667,6 @@ fn nextest_status_line_matches(line: &str, test: &TestCase) -> bool {
         return false;
     };
     binary == test.binary && tokens[name_index + 1..].join(" ") == test.name
-}
-
-fn adaptive_timeout(baseline_duration_ms: u128) -> Duration {
-    let timeout_ms = baseline_duration_ms
-        .saturating_mul(ADAPTIVE_TIMEOUT_COEFFICIENT)
-        .saturating_add(ADAPTIVE_TIMEOUT_FLOOR_MS)
-        .clamp(ADAPTIVE_TIMEOUT_FLOOR_MS, ADAPTIVE_TIMEOUT_CEILING_MS);
-    Duration::from_millis(timeout_ms as u64)
-}
-
-/// Scale routed groups in adaptive mode without allowing a group invocation to
-/// exceed the adaptive ceiling. Explicit `--timeout` values remain uncapped:
-/// they are an intentional user choice and retain the existing multiplication.
-fn group_timeout(timeout: Duration, test_count: usize, adaptive: bool) -> Duration {
-    let scaled = timeout.saturating_mul(u32::try_from(test_count).unwrap_or(u32::MAX));
-    if adaptive {
-        scaled.min(Duration::from_millis(ADAPTIVE_TIMEOUT_CEILING_MS as u64))
-    } else {
-        scaled
-    }
 }
 
 fn cargo_nextest(

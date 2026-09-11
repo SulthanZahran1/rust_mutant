@@ -305,6 +305,7 @@ dependencies = [
  "anyhow",
  "libc",
  "rayon",
+ "rust-mutant-runner",
  "rust-mutant-tce",
  "serde",
  "serde_json",
@@ -326,9 +327,6 @@ dependencies = [
 [[package]]
 name = "rust-mutant-runner"
 version = "1.0.1"
-dependencies = [
- "rust-mutant-core",
-]
 
 [[package]]
 name = "rust-mutant-tce"
