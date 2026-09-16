@@ -27,7 +27,7 @@ Rust has cargo-mutants (the incumbent, active, ~1.2k stars) but it is function-l
 
 ## Dogfood corpus
 
-sambungapi (MetatechID/sambungapi, private) — a Rust wire-compatible Composio impostor for Bella. It was the intended dogfood corpus for a mutation gate, but that gate was **removed from sambungapi's normal development flow on 2026-09-09** (MetatechID/sambungapi PR #919): the gate machinery was deleted and GOAL-1.0 criterion 7 (the ≥80% mutation-score layer) was amended. rust_mutant is a standalone tool and release; no downstream gate currently depends on it. A benchmark run against a real crate is the next planned evidence step.
+sambungapi (MetatechID/sambungapi, private) — a Rust wire-compatible Composio impostor for Bella. It was the intended dogfood corpus for a mutation gate, but **mutation testing is now fully removed from sambungapi with no return conditions**: the gate machinery was deleted on 2026-09-09 (MetatechID/sambungapi PR #919 — GOAL-1.0 criterion 7, the ≥80% mutation-score layer, was amended), and **2026-09-16 decision #1110 (PR #1118) removed the hand mutation probe and the surrounding adversarial coverage-gate roles as well** — sambungapi's coverage gate is now a single timed Author, and its ladder carries no mutation row. rust_mutant is a standalone tool and release; **no downstream gate currently depends on it**. A benchmark run against a real crate is the next planned evidence step.
 
 ## License
 
