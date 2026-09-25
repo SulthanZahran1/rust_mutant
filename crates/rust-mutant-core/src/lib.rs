@@ -2187,7 +2187,7 @@ fn build_coverage_map(project: &Path, manifest: &Path) -> Result<CoverageMap> {
     let target_dir = routing_root.join("target");
     let listed = nextest_list(project, manifest, &target_dir).unwrap_or_default();
     let all = if listed.is_empty() {
-        static_test_cases(project)
+        static_test_cases(project, manifest)
     } else {
         listed
     };
@@ -2397,7 +2397,7 @@ fn nextest_list(project: &Path, manifest: &Path, target_dir: &Path) -> Result<Ve
                     binary: binary.into(),
                     binary_id: binary_id.into(),
                     name: name.clone(),
-                    label: format!("{binary_id}::{name}"),
+                    label: format!("{binary}::{name}"),
                 });
             }
         }
@@ -2446,13 +2446,13 @@ fn nextest_binary_path(
         .map(|entry| entry.into_path())
 }
 
-fn static_test_cases(project: &Path) -> Vec<TestCase> {
+fn static_test_cases(project: &Path, manifest: &Path) -> Vec<TestCase> {
     let mut cases = Vec::new();
     let tests = project.join("tests");
     if !tests.is_dir() {
         return cases;
     }
-    let package_name = fs::read_to_string(project.join("Cargo.toml"))
+    let package_name = fs::read_to_string(manifest)
         .ok()
         .and_then(|contents| toml::from_str::<toml::Value>(&contents).ok())
         .and_then(|manifest| {
@@ -2493,7 +2493,7 @@ fn static_test_cases(project: &Path) -> Vec<TestCase> {
                     binary: binary.clone(),
                     binary_id: binary_id.clone(),
                     name: name.into(),
-                    label: format!("{binary_id}::{name}"),
+                    label: format!("{binary}::{name}"),
                 });
             }
         }
@@ -3292,7 +3292,7 @@ mod tests {
             binary: binary.into(),
             binary_id: binary_id.clone(),
             name: name.into(),
-            label: format!("{binary_id}::{name}"),
+            label: format!("{binary}::{name}"),
         }
     }
 
