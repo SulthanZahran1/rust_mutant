@@ -30,7 +30,7 @@ pub use rust_mutant_runner::{
 };
 
 pub const SCHEMA_VERSION: u32 = 1;
-const CACHE_SCHEMA_VERSION: u32 = 4;
+const CACHE_SCHEMA_VERSION: u32 = 5;
 const BASELINE_TIMEOUT_MS: u128 = ADAPTIVE_TIMEOUT_CEILING_MS;
 static PEAK_RSS_MIB: AtomicU64 = AtomicU64::new(0);
 pub const GENERIC_FAMILIES: [&str; 10] = [
@@ -2312,7 +2312,10 @@ fn build_coverage_map(project: &Path, manifest: &Path) -> Result<CoverageMap> {
 fn coverage_cache_path(project: &Path) -> Result<PathBuf> {
     let root = std::env::temp_dir().join("rust-mutant-coverage-cache");
     fs::create_dir_all(&root)?;
-    Ok(root.join(format!("{:016x}.json", project_content_hash(project)?)))
+    Ok(root.join(format!(
+        "v{CACHE_SCHEMA_VERSION}-{:016x}.json",
+        project_content_hash(project)?
+    )))
 }
 
 fn project_content_hash(project: &Path) -> Result<u64> {
