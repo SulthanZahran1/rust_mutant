@@ -30,7 +30,7 @@ pub use rust_mutant_runner::{
 };
 
 pub const SCHEMA_VERSION: u32 = 1;
-const CACHE_SCHEMA_VERSION: u32 = 4;
+const CACHE_SCHEMA_VERSION: u32 = 5;
 const BASELINE_TIMEOUT_MS: u128 = ADAPTIVE_TIMEOUT_CEILING_MS;
 static PEAK_RSS_MIB: AtomicU64 = AtomicU64::new(0);
 pub const GENERIC_FAMILIES: [&str; 10] = [
@@ -2108,6 +2108,7 @@ fn current_rss_mib() -> u64 {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct TestCase {
     binary: String,
+    binary_id: String,
     name: String,
     label: String,
 }
@@ -2186,7 +2187,7 @@ fn build_coverage_map(project: &Path, manifest: &Path) -> Result<CoverageMap> {
     let target_dir = routing_root.join("target");
     let listed = nextest_list(project, manifest, &target_dir).unwrap_or_default();
     let all = if listed.is_empty() {
-        static_test_cases(project)
+        static_test_cases(project, manifest)
     } else {
         listed
     };
@@ -2207,6 +2208,7 @@ fn build_coverage_map(project: &Path, manifest: &Path) -> Result<CoverageMap> {
         fs::create_dir_all(&test_dir)?;
         let profile_pattern = test_dir.join("%p-%m.profraw");
         let mut command = Command::new("cargo");
+        let filterset = nextest_filterset(std::slice::from_ref(test));
         command
             .current_dir(project)
             .arg("nextest")
@@ -2215,9 +2217,8 @@ fn build_coverage_map(project: &Path, manifest: &Path) -> Result<CoverageMap> {
             .arg(manifest)
             .arg("--target-dir")
             .arg(&target_dir)
-            .arg("--test")
-            .arg(&test.binary)
-            .arg(&test.name)
+            .arg("--filterset")
+            .arg(&filterset)
             .arg("--no-fail-fast")
             .arg("--status-level")
             .arg("fail")
@@ -2311,7 +2312,10 @@ fn build_coverage_map(project: &Path, manifest: &Path) -> Result<CoverageMap> {
 fn coverage_cache_path(project: &Path) -> Result<PathBuf> {
     let root = std::env::temp_dir().join("rust-mutant-coverage-cache");
     fs::create_dir_all(&root)?;
-    Ok(root.join(format!("{:016x}.json", project_content_hash(project)?)))
+    Ok(root.join(format!(
+        "v{CACHE_SCHEMA_VERSION}-{:016x}.json",
+        project_content_hash(project)?
+    )))
 }
 
 fn project_content_hash(project: &Path) -> Result<u64> {
@@ -2376,18 +2380,22 @@ fn nextest_list(project: &Path, manifest: &Path, target_dir: &Path) -> Result<Ve
     let mut cases = Vec::new();
     if let Some(suites) = value["rust-suites"].as_object() {
         for suite in suites.values() {
-            if suite["kind"] != "test" {
-                continue;
-            }
             let Some(binary) = suite["binary-name"].as_str() else {
+                continue;
+            };
+            let Some(binary_id) = suite["binary-id"].as_str() else {
                 continue;
             };
             let Some(testcases) = suite["testcases"].as_object() else {
                 continue;
             };
+            if testcases.is_empty() {
+                continue;
+            }
             for name in testcases.keys() {
                 cases.push(TestCase {
                     binary: binary.into(),
+                    binary_id: binary_id.into(),
                     name: name.clone(),
                     label: format!("{binary}::{name}"),
                 });
@@ -2438,12 +2446,22 @@ fn nextest_binary_path(
         .map(|entry| entry.into_path())
 }
 
-fn static_test_cases(project: &Path) -> Vec<TestCase> {
+fn static_test_cases(project: &Path, manifest: &Path) -> Vec<TestCase> {
     let mut cases = Vec::new();
     let tests = project.join("tests");
     if !tests.is_dir() {
         return cases;
     }
+    let package_name = fs::read_to_string(manifest)
+        .ok()
+        .and_then(|contents| toml::from_str::<toml::Value>(&contents).ok())
+        .and_then(|manifest| {
+            manifest
+                .get("package")
+                .and_then(|package| package.get("name"))
+                .and_then(toml::Value::as_str)
+                .map(str::to_owned)
+        });
     for entry in WalkDir::new(tests)
         .follow_links(false)
         .into_iter()
@@ -2461,6 +2479,10 @@ fn static_test_cases(project: &Path) -> Vec<TestCase> {
             .unwrap_or_default()
             .to_string_lossy()
             .to_string();
+        // Static fallback mirrors nextest's package-name::target binary-id.
+        let binary_id = package_name
+            .as_deref()
+            .map_or_else(|| binary.clone(), |package| format!("{package}::{binary}"));
         for line in source.lines() {
             let trimmed = line.trim();
             if let Some(name) = trimmed
@@ -2469,6 +2491,7 @@ fn static_test_cases(project: &Path) -> Vec<TestCase> {
             {
                 cases.push(TestCase {
                     binary: binary.clone(),
+                    binary_id: binary_id.clone(),
                     name: name.into(),
                     label: format!("{binary}::{name}"),
                 });
@@ -2622,7 +2645,7 @@ fn grouped_test_cases(selected: &[TestCase]) -> Vec<Vec<TestCase>> {
         if let Some(group) = groups.iter_mut().find(|group: &&mut Vec<TestCase>| {
             group
                 .first()
-                .is_some_and(|first| first.binary == test.binary)
+                .is_some_and(|first| first.binary_id == test.binary_id)
         }) {
             group.push(test.clone());
         } else {
@@ -2633,11 +2656,13 @@ fn grouped_test_cases(selected: &[TestCase]) -> Vec<Vec<TestCase>> {
 }
 
 fn nextest_filterset(tests: &[TestCase]) -> String {
-    tests
+    let binary_id = escape_nextest_matcher(&tests[0].binary_id);
+    let tests = tests
         .iter()
         .map(|test| format!("test(={})", escape_nextest_matcher(&test.name)))
         .collect::<Vec<_>>()
-        .join(" | ")
+        .join(" | ");
+    format!("binary_id(={binary_id}) & ({tests})")
 }
 
 fn escape_nextest_matcher(value: &str) -> String {
@@ -2681,10 +2706,7 @@ fn nextest_status_line_matches(line: &str, test: &TestCase) -> bool {
     let Some(reporter) = tokens.get(name_index) else {
         return false;
     };
-    let Some((_, binary)) = reporter.rsplit_once("::") else {
-        return false;
-    };
-    binary == test.binary && tokens[name_index + 1..].join(" ") == test.name
+    *reporter == test.binary_id && tokens[name_index + 1..].join(" ") == test.name
 }
 
 fn cargo_nextest(
@@ -2726,12 +2748,10 @@ fn cargo_nextest(
     }
     let mut command_text = String::from("cargo nextest run");
     if let Some(tests) = tests {
-        let binary = &tests[0].binary;
-        command.arg("--test").arg(binary);
         let filterset = nextest_filterset(tests);
         command.arg("--filterset").arg(&filterset);
         command_text.push_str(&format!(
-            " --test {binary} --filterset '{filterset}' --fail-fast --status-level pass --final-status-level pass"
+            " --filterset '{filterset}' --fail-fast --status-level pass --final-status-level pass"
         ));
     } else {
         command_text.push_str(" --no-fail-fast --status-level fail --final-status-level none");
@@ -3190,7 +3210,7 @@ mod tests {
         assert_eq!(groups[1].len(), 1);
         assert_eq!(
             nextest_filterset(&groups[0]),
-            r"test(=first) | test(=name\)\,with\\path)"
+            r"binary_id(=package::alpha) & (test(=first) | test(=name\)\,with\\path))"
         );
         let output = format!(
             "        PASS [0.001s] (1/2) package::alpha first\n        FAIL [0.001s] (2/2) package::alpha {}\n",
@@ -3267,8 +3287,10 @@ mod tests {
     }
 
     fn test_case(binary: &str, name: &str) -> TestCase {
+        let binary_id = format!("package::{binary}");
         TestCase {
             binary: binary.into(),
+            binary_id: binary_id.clone(),
             name: name.into(),
             label: format!("{binary}::{name}"),
         }

@@ -309,6 +309,7 @@ dependencies = [
  "rust-mutant-tce",
  "serde",
  "serde_json",
+ "toml",
  "tree-sitter",
  "tree-sitter-rust",
  "walkdir",
