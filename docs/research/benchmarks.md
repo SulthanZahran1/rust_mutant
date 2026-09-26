@@ -84,7 +84,7 @@ Three differences make the MSI column misleading if read naively. They are recor
 
 ### First-run artefacts that were fixed on the way to this number
 
-The first attempt at this receipt (2026-09-11, `/home/dev/bench/receipt/`) recorded `killed: 0 / survived: 595 / msi: 0.0` — an artefact of discovery only finding integration suites (1 test discovered). That is fixed (see #41, PR #42) and this receipt supersedes it. Two known limitations remain and are called out above and in the tracker: doctest execution (issue #43) and truncated `testsRun` labels for tests 1–9 in groups of 10+ (issue #44) — the latter affects only the label arrays, not status, buckets, MSI or wall clock.
+The first attempt at this receipt (2026-09-11, `/home/dev/bench/receipt/`) recorded `killed: 0 / survived: 595 / msi: 0.0` — an artefact of discovery only finding integration suites (1 test discovered). That is fixed (see #41, PR #42) and this receipt supersedes it. Two limitations were known when this receipt was taken and are called out above and in the tracker: doctest execution (issue #43, still open) and truncated `testsRun` labels for tests 1–9 in groups of 10+ (issue #44 — **fixed** in PR #46, merged `7bd2553`; label arrays only, so status, buckets, MSI and wall clock in this receipt were never affected). The `testsRun` arrays in `/home/dev/bench/receipt-fixed/report.json` were produced by the pre-fix binary and remain short by up to 9 labels per routed group; re-running is not required for any headline number.
 
 ## Recommended benchmark target set (README claims)
 
