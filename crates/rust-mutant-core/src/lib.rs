@@ -2700,7 +2700,15 @@ fn nextest_status_line_matches(line: &str, test: &TestCase) -> bool {
         return false;
     }
     let mut name_index = 2;
-    if tokens[name_index].starts_with('(') && tokens[name_index].ends_with(')') {
+    // nextest pads the progress index to the width of the total, so a group of
+    // >=10 splits "( 1/62)" into "(" + "1/62)" instead of one token.
+    if tokens[name_index] == "("
+        && tokens
+            .get(name_index + 1)
+            .is_some_and(|token| token.ends_with(')'))
+    {
+        name_index += 2;
+    } else if tokens[name_index].starts_with('(') && tokens[name_index].ends_with(')') {
         name_index += 1;
     }
     let Some(reporter) = tokens.get(name_index) else {
@@ -3231,6 +3239,29 @@ mod tests {
                 .is_empty()
         );
         assert!(completed_test_labels(&groups[1], "error: failed to compile").is_empty());
+    }
+
+    #[test]
+    fn nextest_status_lines_match_padded_and_unpadded_progress_markers() {
+        let tests = vec![test_case("alpha", "tests::first")];
+        let expected = vec!["alpha::tests::first".to_string()];
+        let labels = |line: &str| completed_test_labels(&tests, &stable_diagnostic(line));
+
+        assert_eq!(
+            labels("        PASS [   0.001s] ( 1/15) package::alpha tests::first"),
+            expected
+        );
+        assert!(!labels("        PASS [   0.001s] ( 9/15) package::alpha tests::first").is_empty());
+        assert_eq!(
+            labels("        PASS [   0.001s] (10/15) package::alpha tests::first"),
+            expected
+        );
+        assert_eq!(
+            labels("        PASS [   0.001s] (1/1) package::alpha tests::first"),
+            expected
+        );
+        assert!(labels("        PASS [   0.001s] ( 1/15) package::beta tests::first").is_empty());
+        assert!(labels("        PASS [   0.001s] ( 1/15) package::alpha tests::other").is_empty());
     }
 
     #[test]
