@@ -45,6 +45,161 @@ fn routed_fixture(name: &str, tests: &str) -> PathBuf {
     path
 }
 
+fn doctest_fixture(name: &str) -> PathBuf {
+    let path = report_dir(name);
+    fs::create_dir_all(path.join("src")).expect("source directory should be creatable");
+    fs::create_dir_all(path.join("tests")).expect("tests directory should be creatable");
+    fs::write(
+        path.join("Cargo.toml"),
+        "[package]\nname = \"rust-mutant-doctest-fixture\"\nversion = \"0.1.0\"\nedition = \"2024\"\n\n[lib]\npath = \"src/lib.rs\"\n",
+    )
+    .expect("fixture manifest should be writable");
+    fs::write(
+        path.join("src/lib.rs"),
+        "/// Returns whether `x` is nonzero.\n///\n/// ```\n/// use rust_mutant_doctest_fixture::predicate;\n/// assert!(predicate(1));\n/// ```\npub fn predicate(x: i32) -> bool {\n    x != 0\n}\n",
+    )
+    .expect("fixture source should be writable");
+    fs::write(
+        path.join("tests/smoke.rs"),
+        "use rust_mutant_doctest_fixture::predicate;\n\n#[test]\nfn predicate_is_covered_without_distinguishing_the_mutant() {\n    assert!(predicate(1) || predicate(0));\n}\n",
+    )
+    .expect("fixture integration test should be writable");
+    path
+}
+
+#[test]
+fn routed_survivor_is_rechecked_against_doctests_by_default_and_can_be_disabled() {
+    let project = doctest_fixture("routed-doctest-survivor");
+    let config = project.join("doctest-config.toml");
+    fs::write(&config, "no_doc_tests = false\n").expect("config should be writable");
+    let common = [
+        "--path",
+        project.to_str().unwrap(),
+        "--operators",
+        "ROR",
+        "--mutant",
+        "m0001",
+        "--timeout",
+        "60s",
+        "--format",
+        "json",
+        "--threshold",
+        "0",
+        "--no-tce",
+        "--no-cache",
+        "--config",
+        config.to_str().unwrap(),
+    ];
+
+    let output = run(&common);
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let mutant = &report["mutants"][0];
+    assert_eq!(mutant["original"], "!=");
+    assert_eq!(mutant["replacement"], "==");
+    assert_eq!(mutant["status"], "killed");
+    assert!(
+        mutant["testsRun"]
+            .as_array()
+            .unwrap()
+            .contains(&"doctests".into())
+    );
+    let command = mutant["command"].as_str().unwrap();
+    assert!(command.contains("cargo test --doc"), "command: {command}");
+    assert_eq!(report["doctestStage"]["enabled"], true);
+    assert_eq!(report["doctestStage"]["projectHasDoctests"], true);
+    assert_eq!(report["doctestStage"]["mutantsChecked"], 1);
+    assert_eq!(report["doctestStage"]["mutantsKilled"], 1);
+
+    let mut disabled_args = common.to_vec();
+    disabled_args.push("--no-doc-tests");
+    let output = Command::new(binary())
+        .args(&disabled_args)
+        .output()
+        .expect("rust-mutant binary should run");
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let mutant = &report["mutants"][0];
+    assert_eq!(mutant["status"], "survived");
+    assert!(
+        !mutant["testsRun"]
+            .as_array()
+            .unwrap()
+            .contains(&"doctests".into())
+    );
+    assert!(!mutant["command"].as_str().unwrap().contains("test --doc"));
+    assert_eq!(report["doctestStage"]["enabled"], false);
+    assert_eq!(
+        report["doctestStage"]["projectHasDoctests"],
+        serde_json::Value::Null
+    );
+    assert_eq!(report["doctestStage"]["mutantsChecked"], 0);
+    let _ = fs::remove_dir_all(&project);
+}
+
+#[test]
+fn small_fixture_with_no_doctests_skips_recheck_without_changing_statuses() {
+    let small = fixture("small");
+    let common = [
+        "--path",
+        small.to_str().unwrap(),
+        "--operators",
+        "ROR",
+        "--mutant",
+        "m0001",
+        "--timeout",
+        "60s",
+        "--format",
+        "json",
+        "--threshold",
+        "0",
+        "--no-tce",
+        "--no-cache",
+    ];
+    let output = run(&common);
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let mutant = &report["mutants"][0];
+    assert_eq!(report["doctestStage"]["enabled"], true);
+    assert_eq!(report["doctestStage"]["projectHasDoctests"], false);
+    assert_eq!(report["doctestStage"]["mutantsChecked"], 0);
+    assert!(
+        !mutant["testsRun"]
+            .as_array()
+            .unwrap()
+            .contains(&"doctests".into())
+    );
+    let status = mutant["status"].clone();
+
+    let mut disabled_args = common.to_vec();
+    disabled_args.push("--no-doc-tests");
+    let output = Command::new(binary())
+        .args(&disabled_args)
+        .output()
+        .expect("rust-mutant binary should run");
+    assert_eq!(output.status.code(), Some(0));
+    let disabled: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(disabled["mutants"][0]["status"], status);
+}
+
 #[test]
 fn help_lists_frozen_contract_surface() {
     let output = run(&["--help"]);
@@ -55,6 +210,7 @@ fn help_lists_frozen_contract_surface() {
         "junit",
         "html",
         "--no-tce",
+        "--no-doc-tests",
         "--threshold",
         "--config",
         "--mutants-file",
