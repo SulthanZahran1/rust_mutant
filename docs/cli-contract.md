@@ -88,6 +88,7 @@ The root object contains at least:
 --no-tce
 --threshold <PERCENT>
 --no-routing
+--no-doc-tests
 --no-cache
 --keep-temp
 --max-memory <MiB>
@@ -101,7 +102,10 @@ Defaults:
 - deterministic mutant ordering
 - adaptive timeout by default: baseline duration × 3, with a 5-second floor and a 300-second ceiling
 - routing and cache enabled once M3 exists
+- routed survivors are re-checked with `cargo test --doc` when the project has doctests; `--no-doc-tests` disables this stage
 - TCE enabled automatically after survivors
+
+The TOML configuration key `no_doc_tests = true` disables the routed-survivor doctest re-check; the `--no-doc-tests` CLI flag also disables it and takes precedence over the config file.
 
 ### Timeout policy
 

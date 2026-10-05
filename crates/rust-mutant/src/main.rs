@@ -59,6 +59,9 @@ struct Cli {
     no_tce: bool,
     #[arg(long)]
     no_routing: bool,
+    /// Skip the routed-survivor doctest re-check.
+    #[arg(long)]
+    no_doc_tests: bool,
     #[arg(long)]
     no_cache: bool,
     /// Keep the run's build and TCE scratch directories after the run
@@ -91,6 +94,7 @@ struct Config {
     operators: Option<Vec<String>>,
     no_tce: Option<bool>,
     no_routing: Option<bool>,
+    no_doc_tests: Option<bool>,
     no_cache: Option<bool>,
     incremental: Option<bool>,
     base_ref: Option<String>,
@@ -192,6 +196,7 @@ fn real_main() -> Result<u8> {
         requested_workers: cli.parallel.or(config.parallel).unwrap_or(1).max(1),
         no_cache: cli.no_cache || config.no_cache.unwrap_or(false),
         routing: !(cli.no_routing || config.no_routing.unwrap_or(false)),
+        no_doc_tests: cli.no_doc_tests || config.no_doc_tests.unwrap_or(false),
         incremental,
         base_ref,
         max_memory_mib: cli.max_memory.or(config.max_memory),
@@ -337,4 +342,16 @@ fn parse_duration(value: &str) -> Result<Duration, String> {
         .parse::<u64>()
         .map(Duration::from_secs)
         .map_err(|_| "timeout must be a duration such as 2s or 500ms".to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Config;
+
+    #[test]
+    fn no_doc_tests_config_key_is_optional_and_parsed() {
+        assert_eq!(Config::default().no_doc_tests, None);
+        let config: Config = toml::from_str("no_doc_tests = true\n").unwrap();
+        assert_eq!(config.no_doc_tests, Some(true));
+    }
 }

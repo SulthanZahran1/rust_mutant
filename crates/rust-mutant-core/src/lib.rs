@@ -30,7 +30,7 @@ pub use rust_mutant_runner::{
 };
 
 pub const SCHEMA_VERSION: u32 = 1;
-const CACHE_SCHEMA_VERSION: u32 = 5;
+const CACHE_SCHEMA_VERSION: u32 = 6;
 const BASELINE_TIMEOUT_MS: u128 = ADAPTIVE_TIMEOUT_CEILING_MS;
 static PEAK_RSS_MIB: AtomicU64 = AtomicU64::new(0);
 pub const GENERIC_FAMILIES: [&str; 10] = [
@@ -187,6 +187,19 @@ pub struct RoutingInfo {
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
+pub struct DoctestStageInfo {
+    /// Whether the routed-survivor doctest stage is enabled for this run.
+    pub enabled: bool,
+    /// `None` means the project doctest listing was not checked.
+    pub project_has_doctests: Option<bool>,
+    pub mutants_checked: usize,
+    pub mutants_killed: usize,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub diagnostics: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct Report {
     pub schema_version: u32,
     pub tool: ToolInfo,
@@ -196,6 +209,7 @@ pub struct Report {
     pub timing: Timing,
     pub resources: Resources,
     pub routing: RoutingInfo,
+    pub doctest_stage: DoctestStageInfo,
     pub cache_hits: usize,
 }
 
@@ -225,6 +239,7 @@ pub struct RunOptions {
     pub requested_workers: usize,
     pub no_cache: bool,
     pub routing: bool,
+    pub no_doc_tests: bool,
     pub incremental: bool,
     pub base_ref: Option<String>,
     pub max_memory_mib: Option<u64>,
@@ -249,6 +264,7 @@ impl Default for RunOptions {
             requested_workers: 1,
             no_cache: false,
             routing: true,
+            no_doc_tests: false,
             incremental: false,
             base_ref: None,
             max_memory_mib: None,
@@ -1333,6 +1349,46 @@ pub fn run(options: &RunOptions) -> Result<Report> {
             truncate(&baseline.stderr, 4000)
         );
     }
+    let mut doctest_stage = DoctestStageInfo {
+        enabled: options.routing && !options.no_doc_tests,
+        project_has_doctests: None,
+        mutants_checked: 0,
+        mutants_killed: 0,
+        diagnostics: Vec::new(),
+    };
+    if doctest_stage.enabled {
+        match cargo_doc_test_list(&project, &manifest, &baseline_target_dir, baseline_budget) {
+            Ok(listing) if !listing.timed_out && listing.code == Some(0) => {
+                match doctest_count_from_list(&listing.stdout) {
+                    Some(count) => doctest_stage.project_has_doctests = Some(count > 0),
+                    None => {
+                        doctest_stage.project_has_doctests = Some(false);
+                        doctest_stage.diagnostics.push(format!(
+                            "could not parse doctest listing; skipping survivor re-check: {}",
+                            truncate(&stable_diagnostic(&listing.output()), 1000)
+                        ));
+                    }
+                }
+            }
+            Ok(listing) => {
+                doctest_stage.project_has_doctests = Some(false);
+                doctest_stage.diagnostics.push(format!(
+                    "doctest listing failed; skipping survivor re-check (timed out: {}, exit {:?}): {}",
+                    listing.timed_out,
+                    listing.code,
+                    truncate(&stable_diagnostic(&listing.output()), 1000)
+                ));
+            }
+            Err(error) => {
+                doctest_stage.project_has_doctests = Some(false);
+                doctest_stage.diagnostics.push(format!(
+                    "could not start doctest listing; skipping survivor re-check: {}",
+                    truncate(&error.to_string(), 1000)
+                ));
+            }
+        }
+    }
+    let check_doctests = doctest_stage.enabled && doctest_stage.project_has_doctests == Some(true);
     let mut routing = CoverageMap::disabled();
     if options.routing {
         routing = build_coverage_map(&project, &manifest)?;
@@ -1381,6 +1437,7 @@ pub fn run(options: &RunOptions) -> Result<Report> {
                     mutant,
                     &selected,
                     mutant_timeout,
+                    check_doctests,
                     options,
                     &cache,
                     &cache_hits,
@@ -1391,6 +1448,17 @@ pub fn run(options: &RunOptions) -> Result<Report> {
     });
     let mut results = results?;
     results.sort_by(|a, b| a.mutant.id.cmp(&b.mutant.id));
+    doctest_stage.mutants_checked = results
+        .iter()
+        .filter(|result| result.tests_run.iter().any(|label| label == "doctests"))
+        .count();
+    doctest_stage.mutants_killed = results
+        .iter()
+        .filter(|result| {
+            result.status == Status::Killed.as_str()
+                && result.tests_run.iter().any(|label| label == "doctests")
+        })
+        .count();
     let execution_ms = execution_started.elapsed().as_millis();
     let tce_ms = results
         .iter()
@@ -1450,6 +1518,7 @@ pub fn run(options: &RunOptions) -> Result<Report> {
             mapped_mutants: routing.mapped,
             full_suite_comparison: !options.routing,
         },
+        doctest_stage,
         cache_hits: cache_hits.load(Ordering::Relaxed),
     })
 }
@@ -1528,6 +1597,13 @@ fn report_for_discovery(
             mapped_mutants: 0,
             full_suite_comparison: !options.routing,
         },
+        doctest_stage: DoctestStageInfo {
+            enabled: options.routing && !options.no_doc_tests,
+            project_has_doctests: None,
+            mutants_checked: 0,
+            mutants_killed: 0,
+            diagnostics: Vec::new(),
+        },
         cache_hits: 0,
     }
 }
@@ -1540,13 +1616,14 @@ fn execute_one(
     mutant: Mutant,
     selected: &[TestCase],
     timeout: Duration,
+    check_doctests: bool,
     options: &RunOptions,
     cache: &CacheStore,
     cache_hits: &AtomicUsize,
     changed: Option<&BTreeSet<String>>,
 ) -> Result<MutantResult> {
     let started = Instant::now();
-    let key = cache.key(project, &mutant, selected, options, timeout)?;
+    let key = cache.key(project, &mutant, selected, options, timeout, check_doctests)?;
     let cached = if options.no_cache {
         None
     } else {
@@ -1650,9 +1727,31 @@ fn execute_one(
             }
         }
     }
+    let mut doctest_timeout_diagnostic = None;
+    if check_doctests && final_status == Status::Survived {
+        let command = cargo_doc_test(
+            &scratch,
+            &scratch_manifest,
+            &mutant_target_dir,
+            baseline_timeout(options),
+        )?;
+        tests_run.push("doctests".into());
+        command_texts.push(command.command.clone());
+        let output = stable_diagnostic(&command.output());
+        outputs.push(output.clone());
+        if command.timed_out {
+            doctest_timeout_diagnostic = Some(format!(
+                "doctest re-check timed out after {} ms\n{}",
+                baseline_timeout(options).as_millis(),
+                output
+            ));
+        } else if command.code != Some(0) {
+            final_status = Status::Killed;
+        }
+    }
     let command_text = command_texts.join("\n");
     let mut tce = None;
-    if final_status == Status::Survived && options.tce {
+    if final_status == Status::Survived && options.tce && doctest_timeout_diagnostic.is_none() {
         let tce_target = std::env::temp_dir().join("rust-mutant-tce").join(format!(
             "{:016x}-{}-{}",
             stable_path_hash(project),
@@ -1687,7 +1786,8 @@ fn execute_one(
             timeout.as_millis()
         )),
         _ => None,
-    };
+    }
+    .or_else(|| doctest_timeout_diagnostic.map(|diagnostic| truncate(&diagnostic, 2000)));
     let result = MutantResult {
         mutant,
         status: final_status.as_str().into(),
@@ -1850,19 +1950,24 @@ impl CacheStore {
         tests: &[TestCase],
         options: &RunOptions,
         timeout: Duration,
+        check_doctests: bool,
     ) -> Result<String> {
         let timeout_key = if options.timeout == Duration::from_secs(2) {
             "adaptive".into()
         } else {
             timeout.as_millis().to_string()
         };
+        // Separate disabled-stage outcomes from routed survivors re-checked
+        // against doctests, including projects that gain doctests later.
         let mut value = format!(
-            "cacheSchema={CACHE_SCHEMA_VERSION};engine={};toolchain={};family={};id={};route={};tce={};timeout={timeout_key};",
+            "cacheSchema={CACHE_SCHEMA_VERSION};engine={};toolchain={};family={};id={};route={};noDocTests={};checkDocTests={};tce={};timeout={timeout_key};",
             env!("CARGO_PKG_VERSION"),
             toolchain_identity(),
             mutant.family,
             mutant.id,
             options.routing,
+            options.no_doc_tests,
+            check_doctests,
             options.tce
         );
         value.push_str(&hash_file(&project.join(&mutant.file))?);
@@ -2639,6 +2744,99 @@ fn cargo_test(
     Ok(result)
 }
 
+fn cargo_doc_test_list(
+    cwd: &Path,
+    manifest: &Path,
+    target_dir: &Path,
+    timeout: Duration,
+) -> Result<CommandResult> {
+    let mut command = Command::new("cargo");
+    #[cfg(unix)]
+    command.process_group(0);
+    command
+        .current_dir(cwd)
+        .arg("test")
+        .arg("--doc")
+        .arg("--jobs")
+        .arg("1")
+        .arg("--manifest-path")
+        .arg(manifest)
+        .arg("--target-dir")
+        .arg(target_dir)
+        .arg("--")
+        .arg("--list")
+        .env("CARGO_BUILD_JOBS", "1")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let command_text = format!(
+        "cargo test --doc --jobs 1 --manifest-path {} --target-dir {} -- --list",
+        manifest.display(),
+        target_dir.display()
+    );
+    let mut child = command
+        .spawn()
+        .with_context(|| format!("spawn cargo doctest listing in {}", cwd.display()))?;
+    let mut result = wait_child(&mut child, timeout)?;
+    result.command = command_text;
+    Ok(result)
+}
+
+fn doctest_count_from_list(output: &str) -> Option<usize> {
+    let mut total = 0usize;
+    let mut found_summary = false;
+    for line in output.lines() {
+        let fields = line.split_whitespace().collect::<Vec<_>>();
+        if fields.len() < 4
+            || !fields[1]
+                .strip_suffix(',')
+                .is_some_and(|word| matches!(word, "test" | "tests"))
+            || fields[3] != "benchmarks"
+        {
+            continue;
+        }
+        let count = fields[0].parse::<usize>().ok()?;
+        total = total.checked_add(count)?;
+        found_summary = true;
+    }
+    found_summary.then_some(total)
+}
+
+fn cargo_doc_test(
+    cwd: &Path,
+    manifest: &Path,
+    target_dir: &Path,
+    timeout: Duration,
+) -> Result<CommandResult> {
+    let mut command = Command::new("cargo");
+    #[cfg(unix)]
+    command.process_group(0);
+    command
+        .current_dir(cwd)
+        .arg("test")
+        .arg("--doc")
+        .arg("--jobs")
+        .arg("1")
+        .arg("--manifest-path")
+        .arg(manifest)
+        .arg("--target-dir")
+        .arg(target_dir)
+        .arg("--quiet")
+        .env("CARGO_BUILD_JOBS", "1")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let command_text = format!(
+        "cargo test --doc --jobs 1 --manifest-path {} --target-dir {} --quiet",
+        manifest.display(),
+        target_dir.display()
+    );
+    let mut child = command
+        .spawn()
+        .with_context(|| format!("spawn cargo doctest in {}", cwd.display()))?;
+    let mut result = wait_child(&mut child, timeout)?;
+    result.command = command_text;
+    Ok(result)
+}
+
 fn grouped_test_cases(selected: &[TestCase]) -> Vec<Vec<TestCase>> {
     let mut groups = Vec::new();
     for test in selected {
@@ -2976,6 +3174,23 @@ fn stable_diagnostic(value: &str) -> String {
             .map_or(result.len(), |offset| suffix_start + offset);
         result.replace_range(start..end, "rust-mutant-scratch");
     }
+    let doctest_marker = "rustdoctest";
+    let mut search_from = 0usize;
+    while let Some(relative) = result[search_from..].find(doctest_marker) {
+        let start = search_from + relative;
+        let suffix_start = start + doctest_marker.len();
+        let Some(offset) = result[suffix_start..].find(['/', '\\']) else {
+            search_from = suffix_start;
+            continue;
+        };
+        let end = suffix_start + offset;
+        if end == suffix_start {
+            search_from = suffix_start;
+            continue;
+        }
+        result.replace_range(start..end, doctest_marker);
+        search_from = start + doctest_marker.len();
+    }
     let mut search_from = 0usize;
     while let Some(relative) = result[search_from..].find("thread '") {
         let start = search_from + relative;
@@ -3009,6 +3224,15 @@ fn stable_diagnostic(value: &str) -> String {
             if let Some(end_offset) = line[duration_start..].find('s') {
                 let end = duration_start + end_offset + 1;
                 line.replace_range(duration_start..end, "duration");
+            }
+        }
+        for marker in ["all doctests ran in ", "merged doctests compilation took "] {
+            if let Some(start) = line.find(marker) {
+                let duration_start = start + marker.len();
+                if let Some(end_offset) = line[duration_start..].find('s') {
+                    let end = duration_start + end_offset + 1;
+                    line.replace_range(duration_start..end, "duration");
+                }
             }
         }
         if let Some(start) = line.find("Summary [")
@@ -3292,6 +3516,88 @@ mod tests {
     #[test]
     fn adaptive_timeout_respects_floor_for_tiny_baseline() {
         assert_eq!(adaptive_timeout(0), Duration::from_secs(5));
+    }
+
+    #[test]
+    fn cache_key_separates_doctest_stage_configuration() {
+        let project = std::env::temp_dir().join(format!(
+            "rust-mutant-doctest-cache-key-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&project);
+        fs::create_dir_all(project.join("src")).unwrap();
+        fs::write(
+            project.join("Cargo.toml"),
+            "[package]\nname='cache-key'\nversion='0.1.0'\nedition='2024'\n",
+        )
+        .unwrap();
+        fs::write(project.join("src/lib.rs"), "pub fn f() {}\n").unwrap();
+        let cache = CacheStore::new(&project).unwrap();
+        let mutant = bare_mutant("cache-key-mutant");
+        let options = RunOptions::default();
+        let without_doctests = cache
+            .key(
+                &project,
+                &mutant,
+                &[],
+                &options,
+                Duration::from_secs(5),
+                false,
+            )
+            .unwrap();
+        let with_doctests = cache
+            .key(
+                &project,
+                &mutant,
+                &[],
+                &options,
+                Duration::from_secs(5),
+                true,
+            )
+            .unwrap();
+        assert_ne!(without_doctests, with_doctests);
+
+        let mut disabled = options;
+        disabled.no_doc_tests = true;
+        let disabled_stage = cache
+            .key(
+                &project,
+                &mutant,
+                &[],
+                &disabled,
+                Duration::from_secs(5),
+                false,
+            )
+            .unwrap();
+        assert_ne!(without_doctests, disabled_stage);
+        let _ = fs::remove_dir_all(project);
+    }
+
+    #[test]
+    fn stable_diagnostic_normalizes_random_doctest_temp_paths() {
+        let first = stable_diagnostic("/tmp/rustdoctest5J42Q8/doctest_bundle_2024.rs");
+        let second = stable_diagnostic("/tmp/rustdoctestdymzgI/doctest_bundle_2024.rs");
+        assert_eq!(first, second);
+        assert_eq!(first, "/tmp/rustdoctest/doctest_bundle_2024.rs");
+        assert_eq!(
+            stable_diagnostic("all doctests ran in 0.98s; merged doctests compilation took 0.94s"),
+            "all doctests ran in duration; merged doctests compilation took duration"
+        );
+    }
+
+    #[test]
+    fn doctest_list_counts_zero_nonzero_and_multiple_summaries() {
+        assert_eq!(doctest_count_from_list("0 tests, 0 benchmarks\n"), Some(0));
+        assert_eq!(doctest_count_from_list("1 test, 0 benchmarks\n"), Some(1));
+        assert_eq!(
+            doctest_count_from_list("71 tests, 0 benchmarks\n"),
+            Some(71)
+        );
+        assert_eq!(
+            doctest_count_from_list("2 tests, 0 benchmarks\n3 tests, 0 benchmarks\n"),
+            Some(5)
+        );
+        assert_eq!(doctest_count_from_list("cargo test failed\n"), None);
     }
 
     #[test]

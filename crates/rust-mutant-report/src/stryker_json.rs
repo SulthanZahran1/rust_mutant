@@ -157,8 +157,8 @@ pub fn generate_to_file(report: &Report, path: &std::path::Path) -> Result<()> {
 pub(crate) mod tests {
     use super::*;
     use rust_mutant_core::{
-        Mutant, MutantResult, ProjectInfo, Report, Resources, RoutingInfo, Summary, Timing,
-        ToolInfo,
+        DoctestStageInfo, Mutant, MutantResult, ProjectInfo, Report, Resources, RoutingInfo,
+        Summary, Timing, ToolInfo,
     };
 
     pub(crate) fn report() -> Report {
@@ -231,6 +231,13 @@ pub(crate) mod tests {
                 tests_discovered: 0,
                 mapped_mutants: 0,
                 full_suite_comparison: false,
+            },
+            doctest_stage: DoctestStageInfo {
+                enabled: false,
+                project_has_doctests: None,
+                mutants_checked: 0,
+                mutants_killed: 0,
+                diagnostics: vec![],
             },
             cache_hits: 0,
         }
