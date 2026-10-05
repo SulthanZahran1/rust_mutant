@@ -1623,7 +1623,7 @@ fn execute_one(
     changed: Option<&BTreeSet<String>>,
 ) -> Result<MutantResult> {
     let started = Instant::now();
-    let key = cache.key(project, &mutant, selected, options, timeout)?;
+    let key = cache.key(project, &mutant, selected, options, timeout, check_doctests)?;
     let cached = if options.no_cache {
         None
     } else {
@@ -1950,20 +1950,24 @@ impl CacheStore {
         tests: &[TestCase],
         options: &RunOptions,
         timeout: Duration,
+        check_doctests: bool,
     ) -> Result<String> {
         let timeout_key = if options.timeout == Duration::from_secs(2) {
             "adaptive".into()
         } else {
             timeout.as_millis().to_string()
         };
+        // Separate disabled-stage outcomes from routed survivors re-checked
+        // against doctests, including projects that gain doctests later.
         let mut value = format!(
-            "cacheSchema={CACHE_SCHEMA_VERSION};engine={};toolchain={};family={};id={};route={};noDocTests={};tce={};timeout={timeout_key};",
+            "cacheSchema={CACHE_SCHEMA_VERSION};engine={};toolchain={};family={};id={};route={};noDocTests={};checkDocTests={};tce={};timeout={timeout_key};",
             env!("CARGO_PKG_VERSION"),
             toolchain_identity(),
             mutant.family,
             mutant.id,
             options.routing,
             options.no_doc_tests,
+            check_doctests,
             options.tce
         );
         value.push_str(&hash_file(&project.join(&mutant.file))?);
@@ -3486,6 +3490,61 @@ mod tests {
     #[test]
     fn adaptive_timeout_respects_floor_for_tiny_baseline() {
         assert_eq!(adaptive_timeout(0), Duration::from_secs(5));
+    }
+
+    #[test]
+    fn cache_key_separates_doctest_stage_configuration() {
+        let project = std::env::temp_dir().join(format!(
+            "rust-mutant-doctest-cache-key-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&project);
+        fs::create_dir_all(project.join("src")).unwrap();
+        fs::write(
+            project.join("Cargo.toml"),
+            "[package]\nname='cache-key'\nversion='0.1.0'\nedition='2024'\n",
+        )
+        .unwrap();
+        fs::write(project.join("src/lib.rs"), "pub fn f() {}\n").unwrap();
+        let cache = CacheStore::new(&project).unwrap();
+        let mutant = bare_mutant("cache-key-mutant");
+        let options = RunOptions::default();
+        let without_doctests = cache
+            .key(
+                &project,
+                &mutant,
+                &[],
+                &options,
+                Duration::from_secs(5),
+                false,
+            )
+            .unwrap();
+        let with_doctests = cache
+            .key(
+                &project,
+                &mutant,
+                &[],
+                &options,
+                Duration::from_secs(5),
+                true,
+            )
+            .unwrap();
+        assert_ne!(without_doctests, with_doctests);
+
+        let mut disabled = options;
+        disabled.no_doc_tests = true;
+        let disabled_stage = cache
+            .key(
+                &project,
+                &mutant,
+                &[],
+                &disabled,
+                Duration::from_secs(5),
+                false,
+            )
+            .unwrap();
+        assert_ne!(without_doctests, disabled_stage);
+        let _ = fs::remove_dir_all(project);
     }
 
     #[test]
