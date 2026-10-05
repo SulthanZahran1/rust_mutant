@@ -7,7 +7,7 @@ LLVM-IR trivial compiler equivalence pass.
 
 ## Install
 
-From crates.io after the 1.0.0 release:
+From crates.io:
 
 ```text
 cargo install rust-mutant
@@ -92,6 +92,36 @@ Every mutant has exactly one primary result: `killed`, `survived`,
 - `1`: campaign completed but failed the threshold
 - `2`: invalid arguments, configuration, or project
 - `3`: valid project with zero discovered mutants
+
+Routed runs re-check mutants that survive the routed test suites against the
+project's doctests (`cargo test --doc`) when the project has any, so a mutant
+whose only kill comes from a doctest is reported `killed` rather than
+`survived`. Projects without doctests skip the stage entirely. Disable it with
+`--no-doc-tests` or `no_doc_tests = true`; the run-level `doctestStage` object
+in the JSON report records whether the stage ran and what it checked.
+
+## Benchmark
+
+Measured against [cargo-mutants](https://mutants.rs) on the same machine and
+the same pinned crate — `uuid` v1.24.0, 2 cores, routed defaults, clean tree
+before and after:
+
+| Metric | rust-mutant | cargo-mutants |
+|---|---|---|
+| Mutants generated | 820 | 974 |
+| Wall clock | **40:34** | 4:02:44 |
+| Wall per mutant | **2.96s** | 14.95s |
+| CPU-normalised per mutant | **3.0 cpu-s** | 29.9 cpu-s |
+
+Routed execution is **5.0x faster wall-per-mutant** and **10.1x on
+CPU-normalised terms** than the incumbent on the same crate and box.
+
+The MSI columns are *not* directly comparable, and the benchmark doc says why:
+rust-mutant also mutates `#[cfg(test)]` code (54% of its mutants on uuid),
+the two tools' operator sets differ, and cargo-mutants runs test classes the
+routed path historically skipped. Restricted to production code, the same run
+scores 49.2% (95/193). The full receipt, methodology and caveats live in
+[docs/research/benchmarks.md](docs/research/benchmarks.md).
 
 ## Development
 
