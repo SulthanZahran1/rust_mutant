@@ -122,12 +122,25 @@ jobs:
             echo "Timed out waiting for ${crate}@${version} to appear on crates.io" >&2
             return 1
           }
-          cargo publish --locked -p rust-mutant-tce
-          wait_for_crate rust-mutant-tce "$TAG_VERSION"
-          cargo publish --locked -p rust-mutant-core
-          wait_for_crate rust-mutant-core "$TAG_VERSION"
-          cargo publish --locked -p rust-mutant-runner
-          wait_for_crate rust-mutant-runner "$TAG_VERSION"
-          cargo publish --locked -p rust-mutant-report
-          wait_for_crate rust-mutant-report "$TAG_VERSION"
-          cargo publish --locked -p rust-mutant
+          # Publishing must follow the internal dependency graph:
+          # rust-mutant-tce and rust-mutant-runner have no internal
+          # dependencies; rust-mutant-core depends on both; rust-mutant-report
+          # and the rust-mutant CLI depend on core. Publishing a crate before
+          # its dependencies exist on crates.io fails during `cargo publish`
+          # verification (and a partially published run must be resumable, so
+          # each step is skipped when that version is already live).
+          publish_if_missing() {
+            local crate="$1"
+            local version="$2"
+            if cargo info "${crate}@${version}" >/dev/null 2>&1; then
+              echo "skip: ${crate}@${version} is already published"
+              return 0
+            fi
+            cargo publish --locked -p "${crate}"
+            wait_for_crate "${crate}" "${version}"
+          }
+          publish_if_missing rust-mutant-tce "$TAG_VERSION"
+          publish_if_missing rust-mutant-runner "$TAG_VERSION"
+          publish_if_missing rust-mutant-core "$TAG_VERSION"
+          publish_if_missing rust-mutant-report "$TAG_VERSION"
+          publish_if_missing rust-mutant "$TAG_VERSION"
