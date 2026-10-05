@@ -27,6 +27,16 @@ fn report_dir(name: &str) -> PathBuf {
     path
 }
 
+fn normalize_repeated_report(report: &mut serde_json::Value) {
+    report["timing"] = serde_json::Value::Null;
+    report["resources"] = serde_json::Value::Null;
+    if let Some(mutants) = report["mutants"].as_array_mut() {
+        for mutant in mutants {
+            mutant["durationMs"] = serde_json::Value::Null;
+        }
+    }
+}
+
 fn routed_fixture(name: &str, tests: &str) -> PathBuf {
     let path = report_dir(name);
     fs::create_dir_all(path.join("src")).expect("source directory should be creatable");
@@ -116,6 +126,14 @@ fn routed_survivor_is_rechecked_against_doctests_by_default_and_can_be_disabled(
     assert_eq!(report["doctestStage"]["projectHasDoctests"], true);
     assert_eq!(report["doctestStage"]["mutantsChecked"], 1);
     assert_eq!(report["doctestStage"]["mutantsKilled"], 1);
+
+    let repeated_output = run(&common);
+    assert_eq!(repeated_output.status.code(), Some(0));
+    let mut first = report.clone();
+    let mut repeated: serde_json::Value = serde_json::from_slice(&repeated_output.stdout).unwrap();
+    normalize_repeated_report(&mut first);
+    normalize_repeated_report(&mut repeated);
+    assert_eq!(first, repeated);
 
     let mut disabled_args = common.to_vec();
     disabled_args.push("--no-doc-tests");
@@ -401,15 +419,8 @@ fn repeated_json_runs_match_outside_timing() {
     let second: serde_json::Value = serde_json::from_slice(&run(&args).stdout).unwrap();
     let mut first = first;
     let mut second = second;
-    for report in [&mut first, &mut second] {
-        report["timing"] = serde_json::Value::Null;
-        report["resources"] = serde_json::Value::Null;
-        if let Some(mutants) = report["mutants"].as_array_mut() {
-            for mutant in mutants {
-                mutant["durationMs"] = serde_json::Value::Null;
-            }
-        }
-    }
+    normalize_repeated_report(&mut first);
+    normalize_repeated_report(&mut second);
     assert_eq!(first, second);
 }
 

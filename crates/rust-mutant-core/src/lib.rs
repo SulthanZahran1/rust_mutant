@@ -3174,6 +3174,23 @@ fn stable_diagnostic(value: &str) -> String {
             .map_or(result.len(), |offset| suffix_start + offset);
         result.replace_range(start..end, "rust-mutant-scratch");
     }
+    let doctest_marker = "rustdoctest";
+    let mut search_from = 0usize;
+    while let Some(relative) = result[search_from..].find(doctest_marker) {
+        let start = search_from + relative;
+        let suffix_start = start + doctest_marker.len();
+        let Some(offset) = result[suffix_start..].find(['/', '\\']) else {
+            search_from = suffix_start;
+            continue;
+        };
+        let end = suffix_start + offset;
+        if end == suffix_start {
+            search_from = suffix_start;
+            continue;
+        }
+        result.replace_range(start..end, doctest_marker);
+        search_from = start + doctest_marker.len();
+    }
     let mut search_from = 0usize;
     while let Some(relative) = result[search_from..].find("thread '") {
         let start = search_from + relative;
@@ -3207,6 +3224,15 @@ fn stable_diagnostic(value: &str) -> String {
             if let Some(end_offset) = line[duration_start..].find('s') {
                 let end = duration_start + end_offset + 1;
                 line.replace_range(duration_start..end, "duration");
+            }
+        }
+        for marker in ["all doctests ran in ", "merged doctests compilation took "] {
+            if let Some(start) = line.find(marker) {
+                let duration_start = start + marker.len();
+                if let Some(end_offset) = line[duration_start..].find('s') {
+                    let end = duration_start + end_offset + 1;
+                    line.replace_range(duration_start..end, "duration");
+                }
             }
         }
         if let Some(start) = line.find("Summary [")
@@ -3545,6 +3571,18 @@ mod tests {
             .unwrap();
         assert_ne!(without_doctests, disabled_stage);
         let _ = fs::remove_dir_all(project);
+    }
+
+    #[test]
+    fn stable_diagnostic_normalizes_random_doctest_temp_paths() {
+        let first = stable_diagnostic("/tmp/rustdoctest5J42Q8/doctest_bundle_2024.rs");
+        let second = stable_diagnostic("/tmp/rustdoctestdymzgI/doctest_bundle_2024.rs");
+        assert_eq!(first, second);
+        assert_eq!(first, "/tmp/rustdoctest/doctest_bundle_2024.rs");
+        assert_eq!(
+            stable_diagnostic("all doctests ran in 0.98s; merged doctests compilation took 0.94s"),
+            "all doctests ran in duration; merged doctests compilation took duration"
+        );
     }
 
     #[test]
